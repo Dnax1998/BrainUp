@@ -3,6 +3,7 @@ import ccxt
 import json
 import time
 import os
+import threading
 from flask import Flask, render_template_string
 
 app = Flask('')
@@ -63,7 +64,7 @@ HTML_TEMPLATE = """
 
 def run_analysis():
     now = time.time()
-    if now - state["last_run"] < 120: return # Max co 2 minuty
+    if now - state["last_run"] < 120: return 
 
     print("🔍 URUCHAMIAM ANALIZĘ RYNKU...")
     state["last_run"] = now
@@ -88,7 +89,6 @@ def run_analysis():
         state['history'].append({"time": time.strftime("%H:%M:%S"), "action": dec, "price": price, "reason": data['powod']})
         if len(state['history']) > 10: state['history'].pop(0)
 
-        # Telegram
         requests.post(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/sendMessage", 
                      json={"chat_id": os.getenv("TG_CHAT_ID"), "text": f"🤖 AI: {dec} | Total: {state['total']:.2f} USDT"})
         print(f"✅ SUKCES: {dec}")
@@ -100,7 +100,21 @@ def home():
     run_analysis()
     return render_template_string(HTML_TEMPLATE, usdt=state['usdt'], btc=state['btc'], total=state['total'], hist=state['history'])
 
+def self_ping():
+    """Funkcja zapobiegająca uśpieniu serwera"""
+    time.sleep(30) # Czekaj na start serwera
+    while True:
+        try:
+            # Bot sam odwiedza swoją stronę co 10 minut
+            requests.get("https://brainup-eh8e.onrender.com", timeout=10)
+            print("🕒 Self-ping wysłany...")
+        except:
+            pass
+        time.sleep(600)
+
 if __name__ == "__main__":
-    # Render port binding
+    # Start wątku budzącego
+    threading.Thread(target=self_ping, daemon=True).start()
+    
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
