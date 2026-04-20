@@ -63,41 +63,38 @@ HTML_TEMPLATE = """
 """
 
 def run_analysis():
-    now = time.time()
-    # Usunąłem blokadę 120s, abyś mógł wymusić start odświeżeniem strony
-    print(f"🔍 [SYSTEM] Start analizy: {time.strftime('%H:%M:%S')}")
+    # WYMUSZONE LOGOWANIE NA SAMYM POCZĄTKU
+    print(f"🔍 [DEBUG] Funkcja run_analysis URUCHOMIONA o {time.strftime('%H:%M:%S')}")
     
-    state["last_run"] = now
     try:
         # 1. Pobieranie ceny
         ex = ccxt.mexc()
         price = ex.fetch_ticker("BTC/USDT")['last']
-        print(f"📈 [CENA] BTC/USDT: {price}")
+        print(f"📈 [DEBUG] Cena pobrana: {price}")
         
         # 2. Zapytanie do AI
         key = os.getenv('GEMINI_KEY')
         if not key:
-            print("❌ [BŁĄD] Brak klucza GEMINI_KEY w ustawieniach!")
+            print("❌ [DEBUG] BŁĄD: Brak klucza GEMINI_KEY!")
             return
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
         prompt = f"BTC: {price}. Portfel: {state['usdt']} USDT, {state['btc']} BTC. KUP, SPRZEDAJ lub CZEKAJ? JSON: {{\"decyzja\":\"...\",\"powod\":\"...\"}}"
         
         res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
-        print(f"📡 [AI] Odpowiedź serwera: {res.status_code}")
+        print(f"📡 [DEBUG] Status API Gemini: {res.status_code}")
         
         data_raw = res.json()
         if 'candidates' not in data_raw:
-            print(f"❌ [AI BŁĄD] Gemini zwróciło: {data_raw}")
+            print(f"❌ [DEBUG] Gemini błąd: {data_raw}")
             return
 
         raw_text = data_raw['candidates'][0]['content']['parts'][0]['text']
-        # Oczyszczanie tekstu JSON
         clean_text = raw_text.replace('```json', '').replace('```', '').strip()
         data = json.loads(clean_text)
         
         dec = data['decyzja'].upper()
-        print(f"✅ [DECYZJA] AI wybrało: {dec}")
+        print(f"✅ [DEBUG] AI wybrało: {dec}")
 
         # 3. Logika handlu
         if "KUP" in dec and state['usdt'] > 10:
@@ -115,26 +112,19 @@ def run_analysis():
         
         if len(state['history']) > 15: state['history'].pop(0)
 
-        # 4. Telegram
-        tg_token = os.getenv('TG_TOKEN')
-        tg_chat = os.getenv('TG_CHAT_ID')
-        if tg_token and tg_chat:
-            msg = f"🤖 AI: {dec}\n💰 Total: {state['total']:.2f} USDT\n📈 Kurs: {price}\n💬 {data.get('powod', '')}"
-            requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", 
-                         json={"chat_id": tg_chat, "text": msg})
-
     except Exception as e:
-        print(f"❌ [CRASH] Błąd w run_analysis: {str(e)}")
+        print(f"❌ [DEBUG] BŁĄD KRYTYCZNY: {str(e)}")
 
 @app.route('/')
 def home():
+    print("🏠 [DEBUG] Ktoś wszedł na stronę główną!")
     run_analysis()
     return render_template_string(HTML_TEMPLATE, **state)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
-    print(f"📩 [WEBHOOK] Nowa wiadomość z Telegrama")
+    print("📩 [DEBUG] Odebrano Webhook z Telegrama")
     if data and "message" in data:
         chat_id = str(data["message"]["chat"]["id"])
         text = data["message"].get("text", "").lower()
@@ -148,15 +138,11 @@ def webhook():
 def self_ping():
     time.sleep(15)
     base_url = "https://brainup-eh8e.onrender.com"
-    try:
-        requests.get(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/setWebhook?url={base_url}/webhook")
-        print("🔗 [WEBHOOK] Rejestracja zakończona.")
-    except: pass
-
+    requests.get(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/setWebhook?url={base_url}/webhook")
     while True:
         try:
             requests.get(base_url, timeout=10)
-            print("🕒 [PING] Aktywność podtrzymana.")
+            print("🕒 [DEBUG] Self-ping wykonany")
         except: pass
         time.sleep(600)
 
