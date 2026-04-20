@@ -34,7 +34,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container mt-5">
-        <h2 class="mb-4 text-center text-uppercase tracking-wider">🤖 AI Crypto Trader Dashboard</h2>
+        <h2 class="mb-4 text-center text-uppercase">🤖 AI Crypto Trader Dashboard</h2>
         
         <div class="row">
             <div class="col-md-4">
@@ -58,10 +58,10 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="card p-4">
-            <h5 class="mb-3">Ostatnie Akcje (Historia)</h5>
+            <h5 class="mb-3 text-center">Ostatnie Akcje (Historia)</h5>
             <div id="history-container">
                 {% if not history %}
-                    <p class="text-muted italic">Czekam na pierwszą analizę rynku...</p>
+                    <p class="text-muted text-center italic">Czekam na pierwszą analizę rynku (odśwież za chwilę)...</p>
                 {% endif %}
                 {% for trade in history[::-1] %}
                 <div class="trade-row">
@@ -77,7 +77,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
     <script>
-        // Automatyczne odświeżanie strony co 60 sekund
         setTimeout(function(){ location.reload(); }, 60000);
     </script>
 </body>
@@ -106,7 +105,7 @@ def send_telegram(message):
     try:
         requests.post(url, json={"chat_id": CONFIG["tg_chat_id"], "text": message, "parse_mode": "Markdown"}, timeout=10)
     except Exception as e:
-        print(f"Błąd Telegram: {e}")
+        print(f"❌ Błąd Telegram: {e}")
 
 def run_bot():
     print("🚀 Pętla bota aktywowana!")
@@ -118,7 +117,9 @@ def run_bot():
         try:
             print("🔍 Analizuję rynek...")
             exchange = ccxt.mexc()
-            price = exchange.fetch_ticker(CONFIG["symbol"])['last']
+            ticker = exchange.fetch_ticker(CONFIG["symbol"])
+            price = ticker['last']
+            print(f"📈 Aktualna cena {CONFIG['symbol']}: {price} USDT")
             
             prompt = (
                 f"Aktualna cena BTC: {price} USDT. "
@@ -128,45 +129,57 @@ def run_bot():
             )
             
             response = requests.post(api_url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
+            
             if response.status_code == 200:
-                raw_text = response.json()['candidates'][0]['content']['parts'][0]['text']
-                data = json.loads(raw_text.replace('```json', '').replace('```', '').strip())
+                res_data = response.json()
+                raw_text = res_data['candidates'][0]['content']['parts'][0]['text']
+                print(f"🤖 Odpowiedź AI (raw): {raw_text}")
                 
-                decyzja = data['decyzja'].upper()
+                # Ulepszone wycinanie JSON-a
+                clean_json = raw_text.strip()
+                if "```json" in clean_json:
+                    clean_json = clean_json.split("```json")[1].split("```")[0].strip()
+                elif "```" in clean_json:
+                    clean_json = clean_json.split("```")[1].split("```")[0].strip()
                 
-                # Logika handlu
+                data = json.loads(clean_json)
+                decyzja = data.get('decyzja', 'CZEKAJ').upper()
+                powod = data.get('powod', 'Brak powodu')
+                
+                # Mechanizm handlu
                 if "KUP" in decyzja and portfolio['usdt'] > 10:
                     portfolio['btc'] = portfolio['usdt'] / price
                     portfolio['usdt'] = 0.0
+                    print("💰 AKCJA: KUPIONO")
                 elif "SPRZEDAJ" in decyzja and portfolio['btc'] > 0:
                     portfolio['usdt'] = portfolio['btc'] * price
                     portfolio['btc'] = 0.0
+                    print("💰 AKCJA: SPRZEDANO")
                 
                 portfolio['total'] = portfolio['usdt'] + (portfolio['btc'] * price)
                 
-                # Zapisz do historii strony
+                # Historia do dashboardu
                 history.append({
                     "time": time.strftime("%H:%M:%S"),
                     "action": decyzja,
                     "price": price,
-                    "reason": data['powod']
+                    "reason": powod
                 })
                 if len(history) > 10: history.pop(0)
                 
-                # Raport na Telegram
-                msg = f"🤖 **AI:** {decyzja}\n💰 **Wartość portfela:** {portfolio['total']:.2f} USDT\n📝 {data['powod']}"
-                send_telegram(msg)
-            
-            print(f"✅ Analiza zakończona. Łącznie: {portfolio['total']:.2f} USDT")
+                send_telegram(f"🤖 **AI:** {decyzja}\n💰 **Wartość:** {portfolio['total']:.2f} USDT\n📝 {powod}")
+                print(f"✅ Analiza zakończona sukcesem. Stan konta: {portfolio['total']:.2f}")
+            else:
+                print(f"❌ Błąd Gemini API: {response.status_code} - {response.text}")
 
         except Exception as e:
-            print(f"❌ Błąd w run_bot: {e}")
+            print(f"❌ Błąd krytyczny w run_bot: {e}")
         
-        time.sleep(300) # Czekaj 5 minut
+        print("😴 Śpię 5 minut...")
+        time.sleep(300)
 
 if __name__ == "__main__":
     print("🛠️ System startuje...")
-    # Odpalamy serwer WWW w tle
-    threading.Thread(target=run_web, daemon=True).start()
-    # Odpalamy bota w głównym procesie
+    t = threading.Thread(target=run_web, daemon=True)
+    t.start()
     run_bot()
