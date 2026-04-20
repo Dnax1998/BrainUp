@@ -6,107 +6,83 @@ import os
 import threading
 from flask import Flask
 
-# --- KONFIGURACJA SERWERA WWW (DLA RENDERA) ---
+# --- KONFIGURACJA SERWERA WWW ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is running and healthy!"
+    return "Bot is alive!"
 
 def run_web():
-    # Pobieramy port przypisany przez Render
     port = int(os.environ.get('PORT', 8080))
-    # Wyłączamy reloader, aby nie blokować głównej pętli
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    print(f"🌐 Startuję serwer WWW na porcie {port}...")
+    app.run(host='0.0.0.0', port=port)
 
 # --- KONFIGURACJA BOTA ---
 CONFIG = {
     "gemini_key": os.getenv("GEMINI_KEY"),
-    "symbol": "BTC/USDT",
-    "check_interval": 300,  # Analiza co 5 minut
     "tg_token": os.getenv("TG_TOKEN"),
-    "tg_chat_id": os.getenv("TG_CHAT_ID")
+    "tg_chat_id": os.getenv("TG_CHAT_ID"),
+    "symbol": "BTC/USDT"
 }
 
 def send_telegram(message):
-    print(f"📤 Próba wysyłki: {message[:40]}...")
-    if CONFIG["tg_token"] and CONFIG["tg_chat_id"]:
-        try:
-            url = f"https://api.telegram.org/bot{CONFIG['tg_token']}/sendMessage"
-            payload = {
-                "chat_id": CONFIG["tg_chat_id"],
-                "text": message,
-                "parse_mode": "Markdown"
-            }
-            r = requests.post(url, json=payload, timeout=15)
-            print(f"📩 Status wysyłki Telegram: {r.status_code}")
-        except Exception as e:
-            print(f"❌ Błąd wysyłki Telegram: {e}")
-    else:
-        print("⚠️ Brak TG_TOKEN lub TG_CHAT_ID w Environment Variables!")
+    print(f"📤 Wysyłam do TG: {message[:30]}...")
+    url = f"https://api.telegram.org/bot{CONFIG['tg_token']}/sendMessage"
+    try:
+        res = requests.post(url, json={"chat_id": CONFIG["tg_chat_id"], "text": message, "parse_mode": "Markdown"}, timeout=10)
+        print(f"📩 Status TG: {res.status_code}")
+    except Exception as e:
+        print(f"❌ Błąd wysyłki: {e}")
 
 def run_bot():
-    print("🚀 Główna pętla bota wystartowała!")
-    send_telegram("✅ **Bot Tradingowy AI wystartował na Renderze!**\nMonitoruję rynek 24/7.")
+    print("🚀 START PĘTLI BOTA")
+    send_telegram("✅ **Bot uruchomiony pomyślnie!** Sprawdzam rynek...")
     
-    # Adres API Gemini
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={CONFIG['gemini_key']}"
 
     while True:
         try:
-            print(f"🔍 Pobieranie ceny dla {CONFIG['symbol']}...")
+            print(f"🔍 Sprawdzam cenę {CONFIG['symbol']}...")
             exchange = ccxt.mexc()
             ticker = exchange.fetch_ticker(CONFIG["symbol"])
             price = ticker['last']
             
             prompt = (
-                f"Aktualna cena {CONFIG['symbol']} to {price} USDT. "
-                "Jako ekspert tradingu, podaj decyzję: KUP, SPRZEDAJ lub CZEKAJ. "
-                "Podaj powód w jednym krótkim zdaniu po polsku. "
-                "Zwróć odpowiedź WYŁĄCZNIE w formacie JSON: {\"decyzja\": \"...\", \"powod\": \"...\"}"
+                f"Cena {CONFIG['symbol']} to {price} USDT. "
+                "Podaj decyzję: KUP, SPRZEDAJ lub CZEKAJ i powód w 1 zdaniu. "
+                "Format JSON: {\"decyzja\": \"...\", \"powod\": \"...\"}"
             )
             
             response = requests.post(api_url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
             
             if response.status_code == 200:
-                raw_text = response.json()['candidates'][0]['content']['parts'][0]['text']
-                # Oczyszczanie JSONa z ewentualnych tagów ```json
-                clean_json = raw_text.replace('```json', '').replace('```', '').strip()
-                data = json.loads(clean_json)
+                raw = response.json()['candidates'][0]['content']['parts'][0]['text']
+                clean = raw.replace('```json', '').replace('```', '').strip()
+                data = json.loads(clean)
                 
-                status_msg = (
-                    f"💰 **Para:** {CONFIG['symbol']}\n"
-                    f"💵 **Cena:** {price} USDT\n"
-                    f"🤖 **AI:** {data['decyzja']}\n"
-                    f"📝 **Powód:** {data['powod']}"
-                )
-                send_telegram(status_msg)
+                msg = f"💰 **BTC:** {price} USDT\n🤖 **AI:** {data['decyzja']}\n📝 {data['powod']}"
+                send_telegram(msg)
             else:
-                print(f"⚠️ Błąd Gemini API (Status {response.status_code}): {response.text}")
-            
-            print(f"😴 Śpię przez {CONFIG['check_interval']} sekund...")
-            time.sleep(CONFIG["check_interval"])
-            
+                print(f"⚠️ Błąd Gemini API: {response.status_code}")
+
         except Exception as e:
-            print(f"❌ Błąd w pętli bota: {e}")
-            time.sleep(60)
+            print(f"❌ Błąd w pętli: {e}")
+        
+        print("😴 Śpię 5 minut...")
+        time.sleep(300)
 
-# --- START APLIKACJI ---
+# --- URUCHOMIENIE ---
 if __name__ == "__main__":
-    print("🛠️ Inicjalizacja usług...")
+    print("🛠️ Inicjalizacja...")
     
-    # 1. Odpalamy serwer Flask w osobnym wątku (tło)
-    try:
-        t = threading.Thread(target=run_web)
-        t.daemon = True
-        t.start()
-        print("✅ Serwer Flask wystartował w tle.")
-    except Exception as e:
-        print(f"❌ Błąd startu serwera Flask: {e}")
-
-    # 2. Krótka przerwa na ustabilizowanie
-    time.sleep(5)
+    # Najpierw sprawdzamy czy mamy zmienne
+    if not CONFIG["tg_token"] or not CONFIG["tg_chat_id"]:
+        print("❌ BRAK ZMIENNYCH TG_TOKEN LUB TG_CHAT_ID!")
     
-    # 3. Odpalamy bota (Główny proces)
-    print("🚀 Przechodzę do uruchomienia pętli bota...")
+    # Odpalamy serwer w osobnym wątku
+    t = threading.Thread(target=run_web, daemon=True)
+    t.start()
+    
+    # Odpalamy bota w głównym wątku
     run_bot()
