@@ -8,7 +8,7 @@ from flask import Flask, render_template_string, request
 
 app = Flask('')
 
-# --- STAN PORTFELA (Resetuje się przy restarcie serwera) ---
+# --- STAN PORTFELA ---
 state = {
     "usdt": 1000.0,
     "btc": 0.0,
@@ -17,7 +17,7 @@ state = {
     "history": []
 }
 
-# --- DARK MODE DASHBOARD (Naprawione pętle Jinja2) ---
+# --- DESIGN DASHBOARDU ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pl">
@@ -64,38 +64,67 @@ HTML_TEMPLATE = """
 
 def run_analysis():
     now = time.time()
-    # Analiza nie częściej niż co 2 minuty
-    if now - state["last_run"] < 120: return 
+    # Usunąłem blokadę 120s, abyś mógł wymusić start odświeżeniem strony
+    print(f"🔍 [SYSTEM] Start analizy: {time.strftime('%H:%M:%S')}")
     
     state["last_run"] = now
     try:
+        # 1. Pobieranie ceny
         ex = ccxt.mexc()
         price = ex.fetch_ticker("BTC/USDT")['last']
+        print(f"📈 [CENA] BTC/USDT: {price}")
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={os.getenv('GEMINI_KEY')}"
+        # 2. Zapytanie do AI
+        key = os.getenv('GEMINI_KEY')
+        if not key:
+            print("❌ [BŁĄD] Brak klucza GEMINI_KEY w ustawieniach!")
+            return
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
         prompt = f"BTC: {price}. Portfel: {state['usdt']} USDT, {state['btc']} BTC. KUP, SPRZEDAJ lub CZEKAJ? JSON: {{\"decyzja\":\"...\",\"powod\":\"...\"}}"
         
-        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15).json()
-        raw = res['candidates'][0]['content']['parts'][0]['text']
-        data = json.loads(raw.replace('```json', '').replace('```', '').strip())
+        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
+        print(f"📡 [AI] Odpowiedź serwera: {res.status_code}")
+        
+        data_raw = res.json()
+        if 'candidates' not in data_raw:
+            print(f"❌ [AI BŁĄD] Gemini zwróciło: {data_raw}")
+            return
+
+        raw_text = data_raw['candidates'][0]['content']['parts'][0]['text']
+        # Oczyszczanie tekstu JSON
+        clean_text = raw_text.replace('```json', '').replace('```', '').strip()
+        data = json.loads(clean_text)
         
         dec = data['decyzja'].upper()
+        print(f"✅ [DECYZJA] AI wybrało: {dec}")
+
+        # 3. Logika handlu
         if "KUP" in dec and state['usdt'] > 10:
             state['btc'], state['usdt'] = state['usdt'] / price, 0.0
         elif "SPRZEDAJ" in dec and state['btc'] > 0:
             state['usdt'], state['btc'] = state['btc'] * price, 0.0
 
         state['total'] = state['usdt'] + (state['btc'] * price)
-        state['history'].append({"time": time.strftime("%H:%M:%S"), "action": dec, "price": price, "reason": data['powod']})
+        state['history'].append({
+            "time": time.strftime("%H:%M:%S"), 
+            "action": dec, 
+            "price": price, 
+            "reason": data.get('powod', 'Brak uzasadnienia')
+        })
         
         if len(state['history']) > 15: state['history'].pop(0)
 
-        # Wysyłka raportu na Telegram
-        msg = f"🤖 AI: {dec}\n💰 Total: {state['total']:.2f} USDT\n📈 Kurs: {price}\n💬 {data['powod']}"
-        requests.post(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/sendMessage", 
-                     json={"chat_id": os.getenv("TG_CHAT_ID"), "text": msg})
+        # 4. Telegram
+        tg_token = os.getenv('TG_TOKEN')
+        tg_chat = os.getenv('TG_CHAT_ID')
+        if tg_token and tg_chat:
+            msg = f"🤖 AI: {dec}\n💰 Total: {state['total']:.2f} USDT\n📈 Kurs: {price}\n💬 {data.get('powod', '')}"
+            requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", 
+                         json={"chat_id": tg_chat, "text": msg})
+
     except Exception as e:
-        print(f"Błąd analizy: {e}")
+        print(f"❌ [CRASH] Błąd w run_analysis: {str(e)}")
 
 @app.route('/')
 def home():
@@ -105,43 +134,33 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
+    print(f"📩 [WEBHOOK] Nowa wiadomość z Telegrama")
     if data and "message" in data:
         chat_id = str(data["message"]["chat"]["id"])
         text = data["message"].get("text", "").lower()
-        
-        # Obsługa komend dla Twojego ID
         if chat_id == os.getenv("TG_CHAT_ID"):
-            reply = ""
             if text == "/saldo":
-                reply = f"💰 Twoje saldo: {state['total']:.2f} USDT"
-            elif text == "/start":
-                reply = "🤖 Bot Tradingowy gotowy!\nUżyj /saldo, aby sprawdzić stan konta."
-            
-            if reply:
+                msg = f"💰 Twoje saldo: {state['total']:.2f} USDT"
                 requests.post(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/sendMessage", 
-                             json={"chat_id": chat_id, "text": reply})
+                             json={"chat_id": chat_id, "text": msg})
     return "OK", 200
 
 def self_ping():
-    """Funkcja utrzymująca aktywność serwera (Anti-sleep)"""
-    time.sleep(20)
+    time.sleep(15)
     base_url = "https://brainup-eh8e.onrender.com"
-    # Rejestracja webhooka
     try:
         requests.get(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/setWebhook?url={base_url}/webhook")
+        print("🔗 [WEBHOOK] Rejestracja zakończona.")
     except: pass
 
     while True:
         try:
             requests.get(base_url, timeout=10)
-            print("🕒 Self-ping: OK")
+            print("🕒 [PING] Aktywność podtrzymana.")
         except: pass
-        time.sleep(600) # Co 10 minut
+        time.sleep(600)
 
 if __name__ == "__main__":
-    # Uruchomienie pingu w tle
     threading.Thread(target=self_ping, daemon=True).start()
-    
-    # Render używa portu 10000
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
