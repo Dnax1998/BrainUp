@@ -63,28 +63,22 @@ HTML_TEMPLATE = """
 """
 
 def run_analysis():
-    print("🚀 [LOG] Rozpoczynam analizę rynku...")
+    print("🚀 [LOG] Rozpoczynam analizę...")
     try:
-        # 1. Pobranie ceny z giełdy
         ex = ccxt.mexc()
         price = ex.fetch_ticker("BTC/USDT")['last']
         
-        # 2. Pobranie kluczy z ustawień
         gemini_key = os.getenv('GEMINI_KEY')
         tg_token = os.getenv('TG_TOKEN')
         tg_chat = os.getenv('TG_CHAT_ID')
 
-        if not gemini_key:
-            state['history'].append({"time": time.strftime("%H:%M:%S"), "action": "BŁĄD", "price": price, "reason": "Brak GEMINI_KEY w Render Environment!"})
-            return
-
-        # 3. Zapytanie do Gemini AI (Wersja v1)
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+        # ZMIENIONY URL I NAZWA MODELU NA NAJBARDZIEJ STABILNĄ
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={gemini_key}"
         
         payload = {
             "contents": [{
                 "parts": [{
-                    "text": f"Aktualna cena BTC: {price} USDT. Portfel: {state['usdt']} USDT i {state['btc']} BTC. Czy mam KUPIC, SPRZEDAC czy CZEKAC? Odpisz wyłącznie w formacie JSON: {{\"decyzja\":\"KUP/SPRZEDAJ/CZEKAJ\",\"powod\":\"krótkie wyjaśnienie\"}}"
+                    "text": f"Cena BTC: {price} USDT. Portfel: {state['usdt']} USDT i {state['btc']} BTC. Decyzja: KUP, SPRZEDAJ lub CZEKAJ. Format JSON: {{\"decyzja\":\"...\",\"powod\":\"...\"}}"
                 }]
             }]
         }
@@ -92,17 +86,14 @@ def run_analysis():
         res = requests.post(url, json=payload, timeout=15)
         data = res.json()
         
-        # 4. Przetwarzanie odpowiedzi AI
         if 'candidates' in data:
             raw_text = data['candidates'][0]['content']['parts'][0]['text']
-            # Oczyszczenie tekstu z ewentualnych znaczników markdown
             clean_json = raw_text.replace('```json', '').replace('```', '').strip()
             ai_res = json.loads(clean_json)
             
             decyzja = ai_res['decyzja'].upper()
             powod = ai_res.get('powod', 'Brak uzasadnienia')
 
-            # --- LOGIKA HANDLU ---
             if "KUP" in decyzja and state['usdt'] > 10:
                 state['btc'] = state['usdt'] / price
                 state['usdt'] = 0.0
@@ -111,29 +102,19 @@ def run_analysis():
                 state['btc'] = 0.0
 
             state['total'] = state['usdt'] + (state['btc'] * price)
+            state['history'].append({"time": time.strftime("%H:%M:%S"), "action": decyzja, "price": price, "reason": powod})
             
-            # Zapis do historii
-            state['history'].append({
-                "time": time.strftime("%H:%M:%S"),
-                "action": decyzja,
-                "price": price,
-                "reason": powod
-            })
-            
-            # Wysłanie raportu na Telegram
             if tg_token and tg_chat:
                 try:
-                    msg = f"🤖 AI: {decyzja}\n💰 Saldo: {state['total']:.2f} USDT\n📈 Kurs: {price}\n💬 {powod}"
+                    msg = f"🤖 AI: {decyzja}\n💰 Saldo: {state['total']:.2f} USDT\n💬 {powod}"
                     requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={"chat_id": tg_chat, "text": msg})
-                except:
-                    print("⚠️ [BŁĄD] Nie udało się wysłać wiadomości na Telegram.")
+                except: pass
         else:
-            # Obsługa błędów API Google
-            error_msg = data.get('error', {}).get('message', 'Nieznany błąd AI')
+            # Tutaj bot wypisze błąd prosto do tabeli, żebyśmy wiedzieli co jest nie tak
+            error_msg = data.get('error', {}).get('message', 'Błąd struktury API')
             state['history'].append({"time": time.strftime("%H:%M:%S"), "action": "BŁĄD AI", "price": price, "reason": error_msg})
 
     except Exception as e:
-        print(f"❌ [CRASH] Krytyczny błąd: {str(e)}")
         state['history'].append({"time": time.strftime("%H:%M:%S"), "action": "CRASH", "price": 0, "reason": str(e)})
 
 @app.route('/')
@@ -141,25 +122,6 @@ def home():
     run_analysis()
     return render_template_string(HTML_TEMPLATE, **state)
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    # Tu można dodać obsługę komend z Telegrama w przyszłości
-    return "OK", 200
-
-def self_ping():
-    # Podtrzymywanie serwera na Render (Free Tier)
-    time.sleep(15)
-    while True:
-        try:
-            requests.get("https://brainup-eh8e.onrender.com", timeout=10)
-            print("🕒 [PING] Podtrzymano aktywność serwera.")
-        except:
-            pass
-        time.sleep(600) # Co 10 minut
-
 if __name__ == "__main__":
-    # Uruchomienie pingu w tle
-    threading.Thread(target=self_ping, daemon=True).start()
-    # Start serwera Flask
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
