@@ -4,7 +4,7 @@ import json
 import time
 import os
 import threading
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request
 
 app = Flask('')
 
@@ -47,7 +47,7 @@ HTML_TEMPLATE = """
         </div>
         <div class="history-card p-3">
             <h5>Ostatnie Akcje:</h5>
-            {% if not hist %}<p class="text-muted">Inicjalizacja... Odśwież za 15 sekund.</p>{% endif %}
+            {% if not hist %}<p class="text-muted">Inicjalizacja... Odśwież stronę.</p>{% endif %}
             {% for t in hist[::-1] %}
             <div class="trade-item">
                 <span class="badge {% if 'KUP' in t.action %}badge-buy{% elif 'SPRZEDAJ' in t.action %}badge-sell{% else %}bg-secondary{% endif %}">{{ t.action }}</span>
@@ -64,6 +64,7 @@ HTML_TEMPLATE = """
 
 def run_analysis():
     now = time.time()
+    # Blokada, by nie analizować częściej niż co 2 minuty
     if now - state["last_run"] < 120: return 
 
     print("🔍 URUCHAMIAM ANALIZĘ RYNKU...")
@@ -89,32 +90,70 @@ def run_analysis():
         state['history'].append({"time": time.strftime("%H:%M:%S"), "action": dec, "price": price, "reason": data['powod']})
         if len(state['history']) > 10: state['history'].pop(0)
 
+        # Raport na Telegram
+        msg = f"🤖 AI: {dec}\n💰 Total: {state['total']:.2f} USDT\n📈 Cena: {price}\n💬 {data['powod']}"
         requests.post(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/sendMessage", 
-                     json={"chat_id": os.getenv("TG_CHAT_ID"), "text": f"🤖 AI: {dec} | Total: {state['total']:.2f} USDT"})
+                     json={"chat_id": os.getenv("TG_CHAT_ID"), "text": msg})
         print(f"✅ SUKCES: {dec}")
     except Exception as e:
-        print(f"❌ BŁĄD: {e}")
+        print(f"❌ BŁĄD ANALIZY: {e}")
 
 @app.route('/')
 def home():
     run_analysis()
-    return render_template_string(HTML_TEMPLATE, usdt=state['usdt'], btc=state['btc'], total=state['total'], hist=state['history'])
+    return render_template_string(HTML_TEMPLATE, **state)
+
+# --- WEBHOOK DLA KOMEND TELEGRAMA ---
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.get_json()
+    if "message" in data:
+        chat_id = str(data["message"]["chat"]["id"])
+        text = data["message"].get("text", "").lower()
+        
+        # Bezpieczeństwo: reaguj tylko na Twoje ID
+        if chat_id == os.getenv("TG_CHAT_ID"):
+            reply = ""
+            if text == "/start":
+                reply = "🤖 Terminal AI aktywny!\n\nKomendy:\n/saldo - Stan konta\n/pozycja - Co trzymam?\n/status - Ostatnia aktywność\n/trade - Wymuś teraz"
+            elif text == "/saldo":
+                reply = f"💰 Suma: {state['total']:.2f} USDT\n💵 Gotówka: {state['usdt']:.2f} USDT"
+            elif text == "/pozycja":
+                if state['btc'] > 0:
+                    reply = f"₿ Pozycja: OTWARTA\nIlość: {state['btc']:.6f} BTC"
+                else:
+                    reply = "💵 Pozycja: PUSTA (Tylko USDT)"
+            elif text == "/status":
+                last = time.strftime("%H:%M:%S", time.localtime(state['last_run']))
+                reply = f"✅ Bot pracuje!\nOstatnia analiza: {last}\nHistoria: {len(state['history'])} wpisów"
+            elif text == "/trade":
+                state['last_run'] = 0 # Omiń blokadę czasową
+                run_analysis()
+                reply = "⚙️ Uruchamiam natychmiastową analizę rynku..."
+
+            if reply:
+                requests.post(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/sendMessage", 
+                             json={"chat_id": chat_id, "text": reply})
+    return "OK", 200
 
 def self_ping():
-    """Funkcja zapobiegająca uśpieniu serwera"""
-    time.sleep(30) # Czekaj na start serwera
+    """Utrzymuje bota przy życiu i rejestruje Webhook"""
+    time.sleep(20)
+    base_url = "https://brainup-eh8e.onrender.com"
+    # Rejestracja webhooka w API Telegrama
+    try:
+        requests.get(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/setWebhook?url={base_url}/webhook")
+        print("🔗 Webhook Telegrama zarejestrowany!")
+    except: pass
+
     while True:
         try:
-            # Bot sam odwiedza swoją stronę co 10 minut
-            requests.get("https://brainup-eh8e.onrender.com", timeout=10)
-            print("🕒 Self-ping wysłany...")
-        except:
-            pass
+            requests.get(base_url, timeout=10)
+            print("🕒 Self-ping: Serwer aktywny.")
+        except: pass
         time.sleep(600)
 
 if __name__ == "__main__":
-    # Start wątku budzącego
     threading.Thread(target=self_ping, daemon=True).start()
-    
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
