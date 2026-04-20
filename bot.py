@@ -67,7 +67,11 @@ def run_bot():
             time.sleep(60)
 
 if __name__ == "__main__":
-    # Uruchamiamy serwer www w tle
-    threading.Thread(target=run_web).start()
-    # Uruchamiamy bota
+    # 1. Odpalamy serwer www w tle (nie blokuje bota)
+    threading.Thread(target=run_web, daemon=True).start()
+    
+    # 2. Dajemy serwerowi sekundę na rozruch
+    time.sleep(2)
+    
+    # 3. Odpalamy pętlę bota (to teraz przejmie główny proces)
     run_bot()
