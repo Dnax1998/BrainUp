@@ -13,126 +13,116 @@ state = {
     "usdt": 1000.0,
     "btc": 0.0,
     "total": 1000.0,
-    "last_run": 0,
     "history": []
 }
 
-# --- TEMPLATKA DASHBOARDU ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="pl">
+<html>
 <head>
     <meta charset="UTF-8">
-    <title>AI Trader Pro | Terminal</title>
+    <title>AI Trader Pro</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { background: #0b0e11; color: white; padding: 20px; font-family: sans-serif; }
-        .stat-card { background: #1e2329; padding: 20px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; }
-        .history-box { background: #1e2329; border-radius: 12px; margin-top: 20px; padding: 15px; border: 1px solid #2b3139; }
-        .trade-row { border-bottom: 1px solid #2b3139; padding: 10px 0; }
+        .card-custom { background: #1e2329; border: 1px solid #2b3139; border-radius: 12px; padding: 15px; text-align: center; }
+        .history-item { background: #1e2329; border-left: 4px solid #f0b90b; margin-top: 10px; padding: 10px; border-radius: 4px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h2 class="text-center mb-4" style="color: #f0b90b;">🤖 AI TRADER TERMINAL</h2>
-        <div class="row g-3">
-            <div class="col-4"><div class="stat-card"><small style="color:#848e9c">USDT</small><h3>{{ usdt|round(2) }}</h3></div></div>
-            <div class="col-4"><div class="stat-card"><small style="color:#848e9c">BTC</small><h3>{{ btc|round(6) }}</h3></div></div>
-            <div class="col-4"><div class="stat-card"><small style="color:#848e9c">SUMA USDT</small><h3 style="color:#02c076">{{ total|round(2) }}</h3></div></div>
+        <div class="row g-2">
+            <div class="col-4"><div class="card-custom"><small>USDT</small><h4>{{ usdt|round(2) }}</h4></div></div>
+            <div class="col-4"><div class="card-custom"><small>BTC</small><h4>{{ btc|round(6) }}</h4></div></div>
+            <div class="col-4"><div class="card-custom"><small>SUMA</small><h4 style="color:#02c076">{{ total|round(2) }}</h4></div></div>
         </div>
-        <div class="history-box">
-            <h5>Ostatnie Akcje AI:</h5>
-            {% if not history %}<p class="text-muted">Czekam na pierwszą analizę...</p>{% endif %}
+        
+        <div class="mt-4">
+            <h5>Dziennik Operacji:</h5>
+            {% if not history %}<div class="alert alert-info">Czekam na pierwszą analizę...</div>{% endif %}
             {% for t in history[::-1] %}
-            <div class="trade-row">
-                <span class="badge {% if 'KUP' in t.action %}bg-success{% elif 'SPRZEDAJ' in t.action %}bg-danger{% else %}bg-secondary{% endif %}">{{ t.action }}</span>
-                <span class="ms-2">Cena: {{ t.price }} USDT</span>
-                <div class="mt-1 small text-secondary">{{ t.time }} | {{ t.reason }}</div>
+            <div class="history-item">
+                <strong>{{ t.action }}</strong> | {{ t.price }} USDT <br>
+                <small class="text-secondary">{{ t.time }} - {{ t.reason }}</small>
             </div>
             {% endfor %}
         </div>
     </div>
-    <script>setTimeout(() => location.reload(), 30000);</script>
+    <script>setTimeout(() => location.reload(), 20000);</script>
 </body>
 </html>
 """
 
 def run_analysis():
-    # WYMUSZONE LOGI DIAGNOSTYCZNE
-    print(f"🚀 [CRITICAL] START ANALIZY: {time.strftime('%H:%M:%S')}")
+    print("🚀 START ANALIZY...")
     try:
-        # 1. Kurs z giełdy
+        # 1. Cena z giełdy
         ex = ccxt.mexc()
         price = ex.fetch_ticker("BTC/USDT")['last']
-        print(f"📈 [INFO] Aktualna cena BTC: {price}")
+        
+        # 2. Klucze
+        gemini_key = os.getenv('GEMINI_KEY')
+        tg_token = os.getenv('TG_TOKEN')
+        tg_chat = os.getenv('TG_CHAT_ID')
 
-        # 2. Konsultacja z Gemini AI
-        key = os.getenv('GEMINI_KEY')
-        if not key:
-            print("❌ [ERROR] Brak GEMINI_KEY w Environment Variables!")
+        if not gemini_key:
+            state['history'].append({"time": time.strftime("%H:%M:%S"), "action": "BŁĄD", "price": price, "reason": "Brak klucza GEMINI_KEY w ustawieniach!"})
             return
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
-        prompt = f"BTC: {price}. Wallet: {state['usdt']} USDT, {state['btc']} BTC. Decision (KUP/SPRZEDAJ/CZEKAJ)? JSON: {{\"decyzja\":\"...\",\"powod\":\"...\"}}"
+        # 3. Zapytanie AI
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+        prompt = f"Cena BTC: {price}. Portfel: {state['usdt']} USDT, {state['btc']} BTC. KUP, SPRZEDAJ czy CZEKAJ? Odpisz TYLKO JSON: {{\"decyzja\":\"...\",\"powod\":\"...\"}}"
         
         res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
-        print(f"📡 [AI] Status API: {res.status_code}")
-        
         data = res.json()
+        
         if 'candidates' in data:
-            raw_text = data['candidates'][0]['content']['parts'][0]['text']
-            parsed = json.loads(raw_text.replace('```json', '').replace('```', '').strip())
-            
+            raw = data['candidates'][0]['content']['parts'][0]['text']
+            parsed = json.loads(raw.replace('```json', '').replace('```', '').strip())
             dec = parsed['decyzja'].upper()
-            print(f"✅ [DECISION] AI wybrało: {dec}")
 
-            # Handel (Wirtualny)
+            # Logika handlu
             if "KUP" in dec and state['usdt'] > 10:
                 state['btc'], state['usdt'] = state['usdt'] / price, 0.0
             elif "SPRZEDAJ" in dec and state['btc'] > 0:
                 state['usdt'], state['btc'] = state['btc'] * price, 0.0
 
             state['total'] = state['usdt'] + (state['btc'] * price)
-            state['history'].append({
-                "time": time.strftime("%H:%M:%S"), 
-                "action": dec, 
-                "price": price, 
-                "reason": parsed.get('powod', 'Brak danych')
-            })
             
-            # Raport Telegram
-            tg_token = os.getenv('TG_TOKEN')
-            tg_chat = os.getenv('TG_CHAT_ID')
-            if tg_token and tg_chat:
-                msg = f"🤖 AI Decyzja: {dec}\n💰 Portfel: {state['total']:.2f} USDT\n💬 {parsed.get('powod', '')}"
-                requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={"chat_id": tg_chat, "text": msg})
+            # Dodaj do historii
+            new_entry = {"time": time.strftime("%H:%M:%S"), "action": dec, "price": price, "reason": parsed['powod']}
+            state['history'].append(new_entry)
+            print(f"✅ DECYZJA: {dec}")
+
+            # Telegram (w osobnej próbie, żeby błąd TG nie zabił bota)
+            try:
+                if tg_token and tg_chat:
+                    msg = f"🤖 AI: {dec}\n💰 Saldo: {state['total']:.2f} USDT\n💬 {parsed['powod']}"
+                    requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage", json={"chat_id": tg_chat, "text": msg})
+            except:
+                print("⚠️ Błąd wysyłki na Telegram")
         else:
-            print(f"❌ [AI ERROR] Brak odpowiedzi candidates: {data}")
+            state['history'].append({"time": time.strftime("%H:%M:%S"), "action": "BŁĄD AI", "price": price, "reason": str(data)})
 
     except Exception as e:
-        print(f"❌ [CRASH] Coś poszło nie tak: {str(e)}")
+        print(f"❌ CRASH: {str(e)}")
+        state['history'].append({"time": time.strftime("%H:%M:%S"), "action": "CRASH", "price": 0, "reason": str(e)})
 
 @app.route('/')
 def home():
-    print("🌐 [VISIT] Ktoś wszedł na dashboard!")
     run_analysis()
     return render_template_string(HTML_TEMPLATE, **state)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    print("📩 [TG] Odebrano sygnał z Telegrama")
     return "OK", 200
 
 def self_ping():
-    time.sleep(20)
-    # Rejestracja Webhooka
-    base_url = "https://brainup-eh8e.onrender.com"
-    requests.get(f"https://api.telegram.org/bot{os.getenv('TG_TOKEN')}/setWebhook?url={base_url}/webhook")
-    
+    time.sleep(15)
     while True:
-        try:
-            requests.get(base_url, timeout=10)
-            print("🕒 [PING] Serwer podtrzymany.")
+        try: requests.get("https://brainup-eh8e.onrender.com")
         except: pass
         time.sleep(600)
 
