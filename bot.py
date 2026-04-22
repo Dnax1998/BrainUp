@@ -9,7 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask('')
 
-# Stan bota
+# Rozbudowany stan bota (z licznikami)
 state = {
     "usdt": 1000.0, 
     "btc": 0.0, 
@@ -17,13 +17,11 @@ state = {
     "history": [],
     "buy_count": 0,
     "sell_count": 0,
-    "avg_price": 0.0,
     "last_rsi": 50.0
 }
 
 client = Groq(api_key=os.getenv('GROQ_KEY'))
 
-# Funkcja obliczająca RSI ręcznie (żeby uniknąć błędów instalacji)
 def calculate_rsi(prices, period=14):
     if len(prices) < period: return 50.0
     delta = prices.diff()
@@ -37,7 +35,7 @@ HTML_TEMPLATE = """
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>AI TRADER ULTRA v3.2 | Built-in RSI</title>
+    <title>AI TRADER ULTRA v3.3</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { background: #0b0e11; color: white; padding: 20px; font-family: 'Segoe UI', sans-serif; }
@@ -45,19 +43,27 @@ HTML_TEMPLATE = """
         .history-item { background: #1e2329; border-left: 4px solid #00f2ff; margin-top: 8px; padding: 12px; border-radius: 4px; }
         .action-KUPNO { border-left-color: #02c076; }
         .action-SPRZEDAŻ { border-left-color: #f84960; }
+        .val-profit { color: #02c076; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2 class="text-center mb-4" style="color: #00f2ff;">🛡️ AI TRADER ULTRA v3.2</h2>
-        <div class="row g-3 mb-4 text-center">
-            <div class="col-md-3"><div class="stat-card"><small class="text-secondary">PORTFEL USDT</small><h4>{{ usdt|round(2) }}</h4></div></div>
-            <div class="col-md-3"><div class="stat-card"><small class="text-secondary">ZYSK/STRATA</small><h4 style="color: #02c076">{{ (total - 1000)|round(2) }} u</h4></div></div>
-            <div class="col-md-3"><div class="stat-card"><small class="text-secondary">OBECNE RSI</small><h4 style="color: #f3ba2f">{{ last_rsi|round(2) }}</h4></div></div>
-            <div class="col-md-3"><div class="stat-card"><small class="text-secondary">AKTYWNE BTC</small><h4>{{ btc|round(6) }}</h4></div></div>
+        <h2 class="text-center mb-4" style="color: #00f2ff;">🛡️ AI TRADER ULTRA v3.3</h2>
+        
+        <div class="row g-3 mb-4">
+            <div class="col-md-3 col-6"><div class="stat-card"><small class="text-secondary">PORTFEL USDT</small><h4>{{ usdt|round(2) }}</h4></div></div>
+            <div class="col-md-3 col-6"><div class="stat-card"><small class="text-secondary">ZYSK/STRATA</small><h4 class="val-profit">{{ (total - 1000)|round(2) }}</h4></div></div>
+            <div class="col-md-3 col-6"><div class="stat-card"><small class="text-secondary">OBECNE RSI</small><h4 style="color: #f3ba2f">{{ last_rsi|round(2) }}</h4></div></div>
+            <div class="col-md-3 col-6"><div class="stat-card"><small class="text-secondary">AKTYWNE BTC</small><h4>{{ btc|round(6) }}</h4></div></div>
         </div>
-        <h5>Dziennik Operacji (Pakiety 20%):</h5>
-        {% for t in history[::-1][:20] %}
+
+        <div class="row g-2 mb-4 text-center">
+            <div class="col-6"><div class="p-2 border border-secondary rounded">🛒 Zakupy: <strong>{{ buy_count }}</strong></div></div>
+            <div class="col-6"><div class="p-2 border border-secondary rounded">💰 Sprzedaże: <strong>{{ sell_count }}</strong></div></div>
+        </div>
+
+        <h5>Dziennik Operacji:</h5>
+        {% for t in history[::-1][:25] %}
         <div class="history-item action-{{ t.action }}">
             <div class="d-flex justify-content-between">
                 <span class="badge {% if t.action=='KUPNO' %}bg-success{% elif t.action=='SPRZEDAŻ' %}bg-danger{% else %}bg-secondary{% endif %}">{{ t.action }}</span>
@@ -85,7 +91,7 @@ def run_analysis():
         system_prompt = (
             f"Jesteś traderem. RSI={rsi_val:.1f}. Sentyment Twittera: Byczy. "
             "Kupuj pakiety 200 USDT jeśli RSI < 40. Sprzedaj wszystko jeśli RSI > 65 lub masz zysk. "
-            "Odpowiadaj tylko JSON: {\"decision\": \"BUY/SELL/WAIT\", \"reason\": \"...\"}"
+            "Graj agresywnie. Odpowiadaj tylko JSON: {\"decision\": \"BUY/SELL/WAIT\", \"reason\": \"...\"}"
         )
 
         chat_completion = client.chat.completions.create(
@@ -100,12 +106,11 @@ def run_analysis():
         act_name = "CZEKANIE"
 
         if "BUY" in decision and state['usdt'] >= 200:
-            new_btc = 200 / price
-            state['btc'] += new_btc
+            state['btc'] += (200 / price)
             state['usdt'] -= 200
             state['buy_count'] += 1
             act_name = "KUPNO"
-        elif "SELL" in decision and state['btc'] > 0:
+        elif "SELL" in decision and state['btc'] > 0.00001:
             state['usdt'] += state['btc'] * price
             state['btc'] = 0.0
             state['sell_count'] += 1
