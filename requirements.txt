@@ -3,3 +3,5 @@ requests
 ccxt
 groq
 apscheduler
+pandas
+pandas_ta
