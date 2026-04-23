@@ -6,8 +6,12 @@ import pandas as pd
 from groq import Groq
 from flask import Flask, render_template_string
 from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime
 
 app = Flask('')
+
+# Zapisujemy czas startu bota
+start_time = datetime.now()
 
 state = {
     "usdt": 1000.0, 
@@ -20,6 +24,13 @@ state = {
 }
 
 client = Groq(api_key=os.getenv('GROQ_KEY'))
+
+def get_uptime():
+    delta = datetime.now() - start_time
+    hours, remainder = divmod(int(delta.total_seconds()), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h {minutes}m"
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period: return 50.0
@@ -34,7 +45,7 @@ HTML_TEMPLATE = """
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>AI TRADER v4.1 DISCIPLINED</title>
+    <title>AI TRADER v4.2 DISCIPLINED</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { background: #0b0e11; color: white; padding: 20px; font-family: 'Segoe UI', sans-serif; }
@@ -42,27 +53,28 @@ HTML_TEMPLATE = """
         .history-item { background: #1e2329; border-left: 4px solid #00f2ff; margin-top: 8px; padding: 12px; border-radius: 4px; font-size: 0.9rem; }
         .action-KUPNO { border-left-color: #02c076; }
         .action-SPRZEDAŻ { border-left-color: #f84960; }
-        .coin-tag { font-weight: bold; color: #f3ba2f; }
-        .profit-plus { color: #02c076; }
-        .profit-minus { color: #f84960; }
+        .uptime-badge { font-size: 0.8rem; color: #00f2ff; border: 1px solid #00f2ff; padding: 2px 8px; border-radius: 10px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2 class="text-center mb-4" style="color: #f3ba2f;">🛡️ AI TRADER v4.1 (Full Power)</h2>
+        <div class="text-center mb-4">
+            <h2 style="color: #f3ba2f; margin-bottom: 5px;">🛡️ AI TRADER v4.2</h2>
+            <span class="uptime-badge">⏱️ Działa od: {{ uptime }}</span>
+        </div>
         
         <div class="row g-3">
             <div class="col-md-4"><div class="stat-card"><small class="text-secondary">GOTÓWKA USDT</small><h4>{{ usdt|round(2) }}</h4></div></div>
-            <div class="col-md-4"><div class="stat-card"><small class="text-secondary">ZYSK/STRATA</small><h4 class="{% if total >= 1000 %}profit-plus{% else %}profit-minus{% endif %}">{{ (total - 1000)|round(2) }}</h4></div></div>
+            <div class="col-md-4"><div class="stat-card"><small class="text-secondary">ZYSK/STRATA</small><h4 style="color: {% if total >= 1000 %}#02c076{% else %}#f84960{% endif %}">{{ (total - 1000)|round(2) }}</h4></div></div>
             <div class="col-md-4"><div class="stat-card"><small class="text-secondary">WARTOŚĆ KONTA</small><h4>{{ total|round(2) }}</h4></div></div>
         </div>
 
         <div class="row g-3 mb-4">
             {% for coin, data in assets.items() %}
             <div class="col-6">
-                <div class="p-3 border border-secondary rounded bg-dark">
-                    <span class="coin-tag">{{ coin }}</span> | RSI: <strong>{{ data.rsi|round(1) }}</strong><br>
-                    <small>Posiadasz: {{ data.amount|round(6) }}</small>
+                <div class="p-3 border border-secondary rounded bg-dark text-center">
+                    <strong style="color: #f3ba2f">{{ coin }}</strong> | RSI: <strong>{{ data.rsi|round(1) }}</strong><br>
+                    <small class="text-secondary">Ilość: {{ data.amount|round(6) }}</small>
                 </div>
             </div>
             {% endfor %}
@@ -99,7 +111,6 @@ def run_multi_analysis():
             state['assets'][symbol]['rsi'] = rsi_val
             current_total += state['assets'][symbol]['amount'] * price
             
-            # Nowy, bardziej rygorystyczny prompt
             system_prompt = (
                 f"Jesteś matematycznym traderem {symbol}. RSI={rsi_val:.1f}. "
                 "ZASADY: 1. Kupuj tylko jeśli RSI < 45. 2. Sprzedawaj jeśli RSI > 65 lub masz zysk > 1%. "
@@ -117,14 +128,12 @@ def run_multi_analysis():
             decision = res.get('decision', 'WAIT').upper()
             reason = res.get('reason', '...')
             
-            # Logika wykonawcza z blokadą RSI
             if "BUY" in decision and rsi_val < 45 and state['usdt'] >= 100:
                 state['assets'][symbol]['amount'] += (100 / price)
                 state['usdt'] -= 100
                 state['history'].append({"time": time.strftime("%H:%M"), "action": "KUPNO", "coin": symbol, "price": price, "reason": f"RSI {rsi_val:.1f}: {reason}"})
             
             elif "SELL" in decision and state['assets'][symbol]['amount'] > 0:
-                # Sprzedaż tylko jeśli AI chce I warunki sprzyjają (RSI > 55 lub zysk)
                 if rsi_val > 55 or "profit" in reason.lower():
                     state['usdt'] += state['assets'][symbol]['amount'] * price
                     state['assets'][symbol]['amount'] = 0.0
@@ -141,7 +150,8 @@ scheduler.add_job(func=run_multi_analysis, trigger="interval", minutes=1)
 scheduler.start()
 
 @app.route('/')
-def home(): return render_template_string(HTML_TEMPLATE, **state)
+def home(): 
+    return render_template_string(HTML_TEMPLATE, **state, uptime=get_uptime())
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
