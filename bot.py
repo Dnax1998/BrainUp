@@ -23,17 +23,10 @@ mexc = ccxt.mexc({
 client = Groq(api_key=os.getenv('GROQ_KEY'))
 
 # Globalny stan dla Dashboardu
-display_state = {
-    "usdt": 0.0,
-    "total": 0.0,
-    "assets": {
-        "BTC": {"amount": 0.0, "rsi": 0, "price": 0.0},
-        "ETH": {"amount": 0.0, "rsi": 0, "price": 0.0}
-    }
-}
+display_state = {"usdt": 0.0, "total": 0.0, "assets": {}}
 
 def log_to_console(msg):
-    """Wypisuje logi natychmiast widoczne w panelu Render"""
+    """Wypisuje logi widoczne w panelu Render"""
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 def calculate_rsi(prices, period=14):
@@ -47,22 +40,21 @@ def calculate_rsi(prices, period=14):
 
 def run_loop():
     global display_state
-    log_to_console("🚀 ROZPOCZYNAM ANALIZĘ RYNKU...")
+    log_to_console("🚀 START ANALIZY v7.0 (Obejście błędu 30029)...")
     
     try:
-        # 1. Pobranie salda z MEXC
+        # 1. Pobranie salda
         balance = mexc.fetch_balance()
-        # Wyciągamy USDC (MEXC trzyma to w 'total')
-        usdc = float(balance.get('USDC', {}).get('total', 0.0))
-        log_to_console(f"💰 Twoje saldo: {usdc} USDC")
+        usdc_balance = float(balance.get('USDC', {}).get('free', 0.0))
+        log_to_console(f"💰 Wolne środki: {usdc_balance} USDC")
 
         assets_update = {}
-        current_total = usdc
+        current_total = usdc_balance
 
         for symbol in ["BTC", "ETH"]:
             pair = f"{symbol}/USDC"
             
-            # 2. Pobranie cen i danych do RSI
+            # 2. Pobranie cen i RSI
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
             bars = mexc.fetch_ohlcv(pair, timeframe='1m', limit=50)
@@ -71,55 +63,45 @@ def run_loop():
             
             amt = float(balance.get(symbol, {}).get('total', 0.0))
             current_total += (amt * price)
-            
             assets_update[symbol] = {"amount": amt, "rsi": rsi_val, "price": price}
-            log_to_console(f"📊 {symbol}: Cena={price}, RSI={rsi_val:.2f}, Posiadasz={amt}")
 
-            # 3. Konsultacja z AI (Groq)
-            sys_prompt = (
-                f"Jesteś traderem krypto. RSI={rsi_val:.1f}. "
-                "Zasada: Kupuj gdy RSI < 45, Sprzedaj gdy RSI > 65. "
-                "Zwróć TYLKO JSON: {\"decision\": \"BUY\"/\"SELL\"/\"WAIT\", \"reason\": \"krótko po polsku\"}"
-            )
-            
+            # 3. Konsultacja AI
+            sys_prompt = f"Trader. RSI={rsi_val:.1f}. Kupuj < 45, Sprzedaj > 65. Zwróć JSON: {{\"decision\": \"BUY/SELL/WAIT\"}}"
             chat = client.chat.completions.create(
-                messages=[{"role": "system", "content": sys_prompt}, 
-                          {"role": "user", "content": f"Analizuj {pair} przy cenie {price}"}],
+                messages=[{"role": "system", "content": sys_prompt}],
                 model="llama-3.1-8b-instant",
                 response_format={"type": "json_object"}
             )
-            
-            ai_res = json.loads(chat.choices[0].message.content)
-            decision = ai_res.get('decision', 'WAIT')
-            log_to_console(f"🤖 AI dla {symbol}: {decision} ({ai_res.get('reason')})")
+            decision = json.loads(chat.choices[0].message.content).get('decision', 'WAIT')
+            log_to_console(f"📊 {symbol}: RSI={rsi_val:.2f} | AI mówi: {decision}")
 
-            # 4. REALNA TRANSAKCJA
-            # Kupujemy jeśli AI tak powie, RSI jest niskie i mamy min. 50 USDC
-            if decision == "BUY" and rsi_val < 45 and usdc >= 50:
-                log_to_console(f"🔥 WARUNKI SPEŁNIONE! KUPUJĘ {symbol} ZA 50 USDC...")
+            # 4. TRANSAKCJA (ZMIANA NA LIMIT DLA OMINIĘCIA BŁĘDU 30029)
+            if decision == "BUY" and rsi_val < 45 and usdc_balance >= 50:
+                # Obliczamy cenę nieco wyższą, by zlecenie LIMIT weszło natychmiast
+                buy_price = round(price * 1.001, 2) 
+                amount_to_buy = round(50 / buy_price, 6)
+                
+                log_to_console(f"🛒 Próba zakupu {symbol} za 50 USDC (Cena Limit: {buy_price})...")
                 try:
-                    mexc.create_market_buy_order(pair, 50)
-                    log_to_console("✅ Zlecenie kupna wykonane pomyślnie!")
-                except Exception as e:
-                    log_to_console(f"❌ BŁĄD TRANSAKCJI (Sprawdź uprawnienia API!): {e}")
-
-            # Sprzedajemy jeśli mamy co i RSI jest wysokie
-            elif decision == "SELL" and amt > 0 and rsi_val > 60:
-                log_to_console(f"💸 WARUNKI SPEŁNIONE! SPRZEDAJĘ {symbol}...")
-                try:
-                    mexc.create_market_sell_order(pair, amt)
-                    log_to_console("✅ Zlecenie sprzedaży wykonane pomyślnie!")
+                    # Zamieniamy Market Buy na Limit Buy (lepsza akceptacja przez API MEXC)
+                    mexc.create_order(pair, 'limit', 'buy', amount_to_buy, buy_price)
+                    log_to_console(f"✅ SUKCES! Zlecenie LIMIT wysłane dla {symbol}")
                 except Exception as e:
                     log_to_console(f"❌ BŁĄD TRANSAKCJI: {e}")
 
-        # Aktualizacja stanu dla strony WWW
-        display_state = {
-            "usdt": usdc,
-            "assets": assets_update,
-            "total": current_total
-        }
+            elif decision == "SELL" and amt > 0 and rsi_val > 65:
+                log_to_console(f"💸 Próba sprzedaży {symbol}...")
+                try:
+                    # Sprzedaż rynkowa zazwyczaj działa lepiej niż kupno, ale używamy safe-call
+                    mexc.create_market_sell_order(pair, amt)
+                    log_to_console(f"✅ Sprzedano {symbol}")
+                except Exception as e:
+                    log_to_console(f"❌ BŁĄD SPRZEDAŻY: {e}")
 
-        # Zapis historii do wykresu
+        # Aktualizacja stanu dla Dashboardu
+        display_state = {"usdt": usdc_balance, "assets": assets_update, "total": current_total}
+        
+        # Zapis do historii
         history = []
         if os.path.exists(STATS_FILE):
             with open(STATS_FILE, 'r') as f: history = json.load(f)
@@ -129,80 +111,30 @@ def run_loop():
         log_to_console("✅ KONIEC CYKLU ANALIZY.")
 
     except Exception as e:
-        log_to_console(f"❌ KRYTYCZNY BŁĄD W PĘTLI: {str(e)}")
+        log_to_console(f"❌ BŁĄD KRYTYCZNY: {e}")
 
 # --- HARMONOGRAM ---
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=run_loop, trigger="interval", minutes=2)
 scheduler.start()
 
-# --- DASHBOARD (HTML) ---
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>AI TRADER v6.5 LIVE</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { background: #0b0e11; color: white; padding: 20px; font-family: 'Segoe UI', sans-serif; }
-        .stat-card { background: #1e2329; border: 1px solid #2b3139; border-radius: 12px; padding: 15px; text-align: center; margin-bottom: 15px; }
-        .coin-box { background: #181a20; border: 1px solid #2b3139; border-radius: 10px; padding: 10px; }
-    </style>
-</head>
-<body>
-    <div class="container text-center">
-        <h2 style="color: #f3ba2f;">🔴 AI TRADER v6.5 LIVE</h2>
-        <div class="mb-4"><span class="badge bg-success">POŁĄCZONO Z MEXC</span></div>
-        
-        <div class="row g-3 mb-4">
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">USDC</small><br><strong>{{ usdt|round(2) }}</strong></div></div>
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">UPTIME</small><br><strong>{{ uptime }}</strong></div></div>
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">TOTAL $</small><br><strong>{{ total|round(2) }}</strong></div></div>
-        </div>
-
-        <div class="row g-3 mb-4">
-            {% for coin, data in assets.items() %}
-            <div class="col-6">
-                <div class="coin-box">
-                    <strong style="color:#f3ba2f">{{ coin }}</strong><br>
-                    <span>{{ data.amount|round(6) }}</span><br>
-                    <small class="text-secondary">RSI: {{ data.rsi|round(1) }}</small>
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-
-        <div style="background: #1e2329; border-radius: 12px; padding: 15px;">
-            <canvas id="balanceChart" height="120"></canvas>
-        </div>
-    </div>
-    <script>
-        const ctx = document.getElementById('balanceChart').getContext('2d');
-        const h = JSON.parse('{{ chart_json|safe }}');
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: h.map(x => new Date(x.timestamp).toLocaleTimeString()),
-                datasets: [{ label: 'Total Value', data: h.map(x => x.balance), borderColor: '#f3ba2f', tension: 0.3 }]
-            },
-            options: { scales: { y: { grid: { color: '#222' } } } }
-        });
-        setTimeout(() => location.reload(), 30000);
-    </script>
-</body>
-</html>
-"""
-
+# --- PROSTY DASHBOARD ---
 @app.route('/')
 def home():
-    h_data = []
-    if os.path.exists(STATS_FILE):
-        with open(STATS_FILE, 'r') as f: h_data = json.load(f)
-    uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
-    return render_template_string(HTML_TEMPLATE, **display_state, uptime=uptime, chart_json=json.dumps(h_data))
+    uptime = f"{(datetime.now() - start_time).seconds // 60} min"
+    return f"""
+    <body style="background:#0b0e11; color:white; font-family:sans-serif; text-align:center; padding:50px;">
+        <h1 style="color:#f3ba2f;">AI TRADER v7.0</h1>
+        <p>Status: <span style="color:#0ecb81;">LIVE</span></p>
+        <hr style="border:0.5px solid #2b3139; width:50%;">
+        <h3>Saldo: {display_state.get('usdt', 0)} USDC</h3>
+        <h3>Wartość portfela: {round(display_state.get('total', 0), 2)} USDC</h3>
+        <p>Uptime: {uptime}</p>
+        <p style="color:#848e9c;">Logi są dostępne w panelu Render.</p>
+        <script>setTimeout(() => location.reload(), 30000);</script>
+    </body>
+    """
 
 if __name__ == "__main__":
-    run_loop() # Pierwszy start danych
+    run_loop() # Start pierwszej analizy
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
