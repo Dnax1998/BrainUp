@@ -21,51 +21,40 @@ mexc = ccxt.mexc({
 
 client = Groq(api_key=os.getenv('GROQ_KEY'))
 
+# Stan początkowy (żeby Dashboard nie był "pusty" na starcie)
+display_state = {
+    "usdt": 0.0,
+    "total": 0.0,
+    "assets": {
+        "BTC": {"amount": 0.0, "rsi": 0, "price": 0.0},
+        "ETH": {"amount": 0.0, "rsi": 0, "price": 0.0}
+    },
+    "history": []
+}
+
 def get_real_state():
     try:
         balance = mexc.fetch_balance()
-        usdc = balance['total'].get('USDC', 0.0)
-        btc_amt = balance['total'].get('BTC', 0.0)
-        eth_amt = balance['total'].get('ETH', 0.0)
+        usdc = float(balance['total'].get('USDC', 0.0))
+        btc_amt = float(balance['total'].get('BTC', 0.0))
+        eth_amt = float(balance['total'].get('ETH', 0.0))
         
-        # Pobieranie cen rynkowych
-        btc_p = mexc.fetch_ticker('BTC/USDC')['last']
-        eth_p = mexc.fetch_ticker('ETH/USDC')['last']
+        btc_p = float(mexc.fetch_ticker('BTC/USDC')['last'])
+        eth_p = float(mexc.fetch_ticker('ETH/USDC')['last'])
         
         total = usdc + (btc_amt * btc_p) + (eth_amt * eth_p)
         
         return {
-            "usdt": usdc, # Używamy nazwy klucza 'usdt' dla kompatybilności z template, ale to USDC
+            "usdt": usdc,
             "assets": {
                 "BTC": {"amount": btc_amt, "rsi": 0, "price": btc_p},
                 "ETH": {"amount": eth_amt, "rsi": 0, "price": eth_p}
             },
-            "total": total,
-            "history": [] 
+            "total": total
         }
     except Exception as e:
         print(f"Błąd portfela: {e}")
         return None
-
-# Globalny stan dla wyświetlania
-display_state = {"history": []}
-
-def save_balance(total):
-    try:
-        data = []
-        if os.path.exists(STATS_FILE):
-            with open(STATS_FILE, 'r') as f: data = json.load(f)
-        data.append({"timestamp": datetime.now().isoformat(), "balance": round(total, 2)})
-        with open(STATS_FILE, 'w') as f: json.dump(data[-2000:], f)
-    except: pass
-
-def calculate_rsi(prices, period=14):
-    if len(prices) < period: return 50.0
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs.iloc[-1]))
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -90,13 +79,13 @@ HTML_TEMPLATE = """
         </div>
         
         <div class="row g-3 mb-4">
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">PORTFEL USDC</small><br><strong>{{ usdt|round(2) }}</strong></div></div>
+            <div class="col-4"><div class="stat-card"><small class="text-secondary">USDC</small><br><strong>{{ usdt|default(0)|round(2) }}</strong></div></div>
             <div class="col-4"><div class="stat-card"><small class="text-secondary">UPTIME</small><br><strong>{{ uptime }}</strong></div></div>
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">ŁĄCZNIE $</small><br><strong>{{ total|round(2) }}</strong></div></div>
+            <div class="col-4"><div class="stat-card"><small class="text-secondary">ŁĄCZNIE $</small><br><strong>{{ total|default(0)|round(2) }}</strong></div></div>
         </div>
 
         <div class="chart-container">
-            <h6>Trend Portfela (Realne Środki)</h6>
+            <h6>Trend Portfela</h6>
             <canvas id="balanceChart" height="100"></canvas>
         </div>
 
@@ -105,8 +94,8 @@ HTML_TEMPLATE = """
             <div class="col-6">
                 <div class="coin-box text-center">
                     <strong style="color:#f3ba2f">{{ coin }}</strong><br>
-                    <span style="font-size: 1.2rem;">{{ data.amount|round(6) }}</span><br>
-                    <small class="text-secondary">RSI: {{ data.rsi|round(1) }}</small>
+                    <span style="font-size: 1.2rem;">{{ data.amount|default(0)|round(6) }}</span><br>
+                    <small class="text-secondary">RSI: {{ data.rsi|default(0)|round(1) }}</small>
                 </div>
             </div>
             {% endfor %}
@@ -114,25 +103,46 @@ HTML_TEMPLATE = """
     </div>
     <script>
         const ctx = document.getElementById('balanceChart').getContext('2d');
-        const chartData = JSON.parse('{{ chart_json|safe }}');
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: chartData.map(d => new Date(d.timestamp).getHours() + ":" + new Date(d.timestamp).getMinutes()),
-                datasets: [{
-                    label: 'Saldo USDC',
-                    data: chartData.map(d => d.balance),
-                    borderColor: '#f3ba2f',
-                    fill: true, tension: 0.3, pointRadius: 1
-                }]
-            },
-            options: { plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#222' } } } }
-        });
-        setTimeout(() => location.reload(), 60000);
+        let chartData = [];
+        try { chartData = JSON.parse('{{ chart_json|safe }}'); } catch(e) {}
+        
+        if(chartData.length > 0) {
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: chartData.map(d => new Date(d.timestamp).getHours() + ":" + new Date(d.timestamp).getMinutes()),
+                    datasets: [{
+                        label: 'Saldo USDC',
+                        data: chartData.map(d => d.balance),
+                        borderColor: '#f3ba2f',
+                        fill: true, tension: 0.3, pointRadius: 1
+                    }]
+                },
+                options: { plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#222' } } } }
+            });
+        }
+        setTimeout(() => location.reload(), 30000);
     </script>
 </body>
 </html>
 """
+
+def save_balance(val):
+    try:
+        data = []
+        if os.path.exists(STATS_FILE):
+            with open(STATS_FILE, 'r') as f: data = json.load(f)
+        data.append({"timestamp": datetime.now().isoformat(), "balance": round(val, 2)})
+        with open(STATS_FILE, 'w') as f: json.dump(data[-1000:], f)
+    except: pass
+
+def calculate_rsi(prices, period=14):
+    if len(prices) < period: return 50.0
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs.iloc[-1]))
 
 def run_loop():
     global display_state
@@ -147,8 +157,8 @@ def run_loop():
             rsi_val = calculate_rsi(df['c'])
             live['assets'][symbol]['rsi'] = rsi_val
             
-            # AI Analiza
-            sys_p = f"Trader MEXC. RSI={rsi_val:.1f}. Kupuj RSI<45, Sprzedaj RSI>65. JSON: {{\"decision\": \"BUY/SELL/WAIT\", \"reason\": \"...\"}}"
+            # AI
+            sys_p = f"Trader MEXC. RSI={rsi_val:.1f}. Kupuj RSI<45, Sprzedaj RSI>65."
             chat = client.chat.completions.create(
                 messages=[{"role": "system", "content": sys_p}, 
                           {"role": "user", "content": f"Cena: {live['assets'][symbol]['price']}. Masz {live['assets'][symbol]['amount']} {symbol}"}],
@@ -156,7 +166,6 @@ def run_loop():
             )
             res = json.loads(chat.choices[0].message.content)
             
-            # Realne zlecenia
             if res.get('decision') == "BUY" and rsi_val < 45 and live['usdt'] >= 50:
                 mexc.create_market_buy_order(pair, 50)
             elif res.get('decision') == "SELL" and live['assets'][symbol]['amount'] > 0 and rsi_val > 55:
@@ -164,7 +173,8 @@ def run_loop():
         
         save_balance(live['total'])
         display_state = live
-    except Exception as e: print(f"Loop error: {e}")
+    except Exception as e:
+        print(f"Loop error: {e}")
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=run_loop, trigger="interval", minutes=2)
@@ -175,8 +185,12 @@ def home():
     chart_data = []
     if os.path.exists(STATS_FILE):
         with open(STATS_FILE, 'r') as f: chart_data = json.load(f)
+    
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
-    return render_template_string(HTML_TEMPLATE, **display_state, uptime=uptime, chart_json=json.dumps(chart_data[-50:]))
+    # Bezpieczne przekazanie danych do template
+    return render_template_string(HTML_TEMPLATE, **display_state, uptime=uptime, chart_json=json.dumps(chart_data))
 
 if __name__ == "__main__":
+    # Pierwszy odczyt danych przy starcie, żeby Dashboard nie był pusty
+    run_loop()
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
