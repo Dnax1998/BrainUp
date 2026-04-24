@@ -12,17 +12,19 @@ app = Flask('')
 start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
 
-# --- KONFIGURACJA GIEŁDY ---
-mexc = ccxt.mexc({
-    'apiKey': os.getenv('MEXC_API_KEY'),
-    'secret': os.getenv('MEXC_SECRET_KEY'),
-    'options': {'defaultType': 'spot'},
-    'enableRateLimit': True
-})
+# --- INICJALIZACJA ---
+def get_mexc_client():
+    return ccxt.mexc({
+        'apiKey': os.getenv('MEXC_API_KEY'),
+        'secret': os.getenv('MEXC_SECRET_KEY'),
+        'options': {'defaultType': 'spot'},
+        'enableRateLimit': True
+    })
 
+mexc = get_mexc_client()
 client = Groq(api_key=os.getenv('GROQ_KEY'))
 
-# Globalny stan początkowy
+# Stan globalny
 display_state = {
     "usdt": 0.0,
     "total": 0.0,
@@ -32,53 +34,43 @@ display_state = {
     }
 }
 
-def get_real_state():
+def fetch_data_from_mexc():
     try:
-        # 1. Sprawdzenie kluczy
-        if not mexc.apiKey or not mexc.secret:
-            print("❌ KRYTYCZNY BŁĄD: Brak kluczy API w Environment Variables!")
-            return None
-
-        # 2. Pobranie salda
+        # Próba pobrania salda
         balance = mexc.fetch_balance()
-        usdc = float(balance['total'].get('USDC', 0.0))
-        btc_amt = float(balance['total'].get('BTC', 0.0))
-        eth_amt = float(balance['total'].get('ETH', 0.0))
         
-        # 3. Pobranie cen
+        # Wyciąganie USDC - MEXC czasem trzyma to w 'free' lub 'total'
+        usdc_total = float(balance.get('USDC', {}).get('total', 0.0))
+        btc_amt = float(balance.get('BTC', {}).get('total', 0.0))
+        eth_amt = float(balance.get('ETH', {}).get('total', 0.0))
+        
+        # Pobieranie cen
         btc_p = float(mexc.fetch_ticker('BTC/USDC')['last'])
         eth_p = float(mexc.fetch_ticker('ETH/USDC')['last'])
         
-        total = usdc + (btc_amt * btc_p) + (eth_amt * eth_p)
-        print(f"✅ POŁĄCZONO Z MEXC. Saldo: {total} USDC")
+        total_val = usdc_total + (btc_amt * btc_p) + (eth_amt * eth_p)
+        
+        print(f"✅ Dane pobrane! Total: {total_val} USDC")
         
         return {
-            "usdt": usdc,
+            "usdt": usdc_total,
             "assets": {
                 "BTC": {"amount": btc_amt, "rsi": 0, "price": btc_p},
                 "ETH": {"amount": eth_amt, "rsi": 0, "price": eth_p}
             },
-            "total": total
+            "total": total_val
         }
     except Exception as e:
-        print(f"❌ BŁĄD KOMUNIKACJI Z MEXC: {str(e)}")
+        print(f"❌ Błąd fetch_data: {str(e)}")
         return None
 
-def calculate_rsi(prices, period=14):
-    if len(prices) < period: return 50.0
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    if loss.iloc[-1] == 0: return 100.0
-    rs = gain / loss
-    return 100 - (100 / (1 + rs.iloc[-1]))
-
+# --- HTML TEMPLATE (Ten sam co v6.2 z drobną poprawką filtrów) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>AI TRADER v6.2 LIVE</title>
+    <title>AI TRADER v6.3 LIVE</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
@@ -86,57 +78,45 @@ HTML_TEMPLATE = """
         .stat-card { background: #1e2329; border: 1px solid #2b3139; border-radius: 12px; padding: 15px; text-align: center; margin-bottom: 15px; }
         .chart-container { background: #1e2329; border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid #2b3139; }
         .coin-box { background: #181a20; border: 1px solid #2b3139; border-radius: 10px; padding: 10px; }
-        .status-live { color: #02c076; font-weight: bold; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="text-center mb-4">
-            <h2 style="color: #f3ba2f;">🔴 AI TRADER v6.2</h2>
-            <div class="status-live">POŁĄCZONO Z MEXC</div>
-        </div>
+    <div class="container text-center">
+        <h2 style="color: #f3ba2f;">🔴 AI TRADER v6.3</h2>
+        <span class="badge bg-success mb-4">LIVE MEXC CONNECTED</span>
         
         <div class="row g-3 mb-4">
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">PORTFEL USDC</small><br><strong>{{ usdt|default(0)|round(2) }}</strong></div></div>
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">UPTIME</small><br><strong>{{ uptime }}</strong></div></div>
-            <div class="col-4"><div class="stat-card"><small class="text-secondary">TOTAL VALUE $</small><br><strong>{{ total|default(0)|round(2) }}</strong></div></div>
-        </div>
-
-        <div class="chart-container">
-            <h6>Wartość Konta (Real-time)</h6>
-            <canvas id="balanceChart" height="100"></canvas>
+            <div class="col-4"><div class="stat-card"><small>PORTFEL USDC</small><br><strong>{{ usdt|round(2) }}</strong></div></div>
+            <div class="col-4"><div class="stat-card"><small>UPTIME</small><br><strong>{{ uptime }}</strong></div></div>
+            <div class="col-4"><div class="stat-card"><small>TOTAL VALUE</small><br><strong>{{ total|round(2) }}</strong></div></div>
         </div>
 
         <div class="row g-3 mb-4">
             {% for coin, data in assets.items() %}
             <div class="col-6">
-                <div class="coin-box text-center">
+                <div class="coin-box">
                     <strong style="color:#f3ba2f">{{ coin }}</strong><br>
-                    <span style="font-size: 1.1rem;">{{ data.amount|default(0)|round(6) }}</span><br>
-                    <small class="text-secondary">RSI: {{ data.rsi|default(0)|round(1) }}</small>
+                    <span>{{ data.amount|round(6) }}</span><br>
+                    <small class="text-secondary">RSI: {{ data.rsi|round(1) }}</small>
                 </div>
             </div>
             {% endfor %}
         </div>
+        
+        <div class="chart-container">
+            <canvas id="balanceChart" height="100"></canvas>
+        </div>
     </div>
     <script>
         const ctx = document.getElementById('balanceChart').getContext('2d');
-        let chartData = [];
-        try { chartData = JSON.parse('{{ chart_json|safe }}'); } catch(e) {}
-        
+        let chartData = JSON.parse('{{ chart_json|safe }}');
         if(chartData.length > 0) {
             new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: chartData.map(d => new Date(d.timestamp).toLocaleTimeString()),
-                    datasets: [{
-                        label: 'Saldo',
-                        data: chartData.map(d => d.balance),
-                        borderColor: '#f3ba2f',
-                        fill: true, tension: 0.3, pointRadius: 1
-                    }]
-                },
-                options: { plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#222' } } } }
+                    datasets: [{ label: 'USDC', data: chartData.map(d => d.balance), borderColor: '#f3ba2f', tension: 0.3 }]
+                }
             });
         }
         setTimeout(() => location.reload(), 30000);
@@ -145,50 +125,48 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def save_balance(val):
-    try:
-        data = []
-        if os.path.exists(STATS_FILE):
-            with open(STATS_FILE, 'r') as f: data = json.load(f)
-        data.append({"timestamp": datetime.now().isoformat(), "balance": round(val, 2)})
-        with open(STATS_FILE, 'w') as f: json.dump(data[-1000:], f)
-    except: pass
+def calculate_rsi(prices, period=14):
+    if len(prices) < period: return 50.0
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    if loss.iloc[-1] == 0: return 100.0
+    return 100 - (100 / (1 + (gain.iloc[-1] / loss.iloc[-1])))
 
 def run_loop():
     global display_state
-    try:
-        live = get_real_state()
-        if not live: return
-        
+    data = fetch_data_from_mexc()
+    if data:
         for symbol in ["BTC", "ETH"]:
             pair = f"{symbol}/USDC"
             bars = mexc.fetch_ohlcv(pair, timeframe='1m', limit=50)
             df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             rsi_val = calculate_rsi(df['c'])
-            live['assets'][symbol]['rsi'] = rsi_val
+            data['assets'][symbol]['rsi'] = rsi_val
             
-            # Decyzja AI
-            sys_p = f"Trader MEXC. RSI={rsi_val:.1f}. Kupuj RSI<45, Sprzedaj RSI>65."
+            # AI Decision
+            sys_p = f"Trader. RSI={rsi_val:.1f}. Kupuj RSI<45, Sprzedaj RSI>65."
             chat = client.chat.completions.create(
-                messages=[{"role": "system", "content": sys_p}, 
-                          {"role": "user", "content": f"Cena: {live['assets'][symbol]['price']}. Masz {live['assets'][symbol]['amount']} {symbol}"}],
+                messages=[{"role": "system", "content": sys_p}, {"role": "user", "content": f"Cena: {data['assets'][symbol]['price']}"}],
                 model="llama-3.1-8b-instant", response_format={"type": "json_object"}
             )
             res = json.loads(chat.choices[0].message.content)
-            decision = res.get('decision', 'WAIT')
             
-            # Realny handel
-            if decision == "BUY" and rsi_val < 45 and live['usdt'] >= 50:
-                print(f"🚀 SKŁADAM ZLECENIE KUPNA {symbol}")
+            if res.get('decision') == "BUY" and rsi_val < 45 and data['usdt'] >= 50:
                 mexc.create_market_buy_order(pair, 50)
-            elif decision == "SELL" and live['assets'][symbol]['amount'] > 0 and rsi_val > 55:
-                print(f"💰 SKŁADAM ZLECENIE SPRZEDAŻY {symbol}")
-                mexc.create_market_sell_order(pair, live['assets'][symbol]['amount'])
+            elif res.get('decision') == "SELL" and data['assets'][symbol]['amount'] > 0 and rsi_val > 55:
+                mexc.create_market_sell_order(pair, data['assets'][symbol]['amount'])
         
-        save_balance(live['total'])
-        display_state = live
-    except Exception as e:
-        print(f"⚠️ Błąd w pętli głównej: {e}")
+        # Save history
+        try:
+            h_data = []
+            if os.path.exists(STATS_FILE):
+                with open(STATS_FILE, 'r') as f: h_data = json.load(f)
+            h_data.append({"timestamp": datetime.now().isoformat(), "balance": round(data['total'], 2)})
+            with open(STATS_FILE, 'w') as f: json.dump(h_data[-500:], f)
+        except: pass
+        
+        display_state = data
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=run_loop, trigger="interval", minutes=2)
@@ -196,16 +174,12 @@ scheduler.start()
 
 @app.route('/')
 def home():
-    chart_data = []
+    h_data = []
     if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, 'r') as f: chart_data = json.load(f)
-        except: pass
-    
+        with open(STATS_FILE, 'r') as f: h_data = json.load(f)
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
-    return render_template_string(HTML_TEMPLATE, **display_state, uptime=uptime, chart_json=json.dumps(chart_data))
+    return render_template_string(HTML_TEMPLATE, **display_state, uptime=uptime, chart_json=json.dumps(h_data))
 
 if __name__ == "__main__":
-    # Pierwszy start przy uruchomieniu serwera
-    run_loop()
+    run_loop() # Pierwszy strzał danych
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
