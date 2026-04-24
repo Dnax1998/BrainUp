@@ -4,3 +4,4 @@ ccxt
 groq
 apscheduler
 pandas
+pytz
