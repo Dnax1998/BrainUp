@@ -23,7 +23,7 @@ client = Groq(api_key=os.getenv('GROQ_KEY'))
 
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
-    "last_action": "System gotowy...",
+    "last_action": "System v8.1 gotowy...",
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
@@ -49,6 +49,8 @@ def run_loop():
             pair = f"{symbol}/USDC"
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
+            
+            # Pobieranie realnego salda (naprawa błędu 30004)
             amt = float(balance.get(symbol, {}).get('free', 0.0))
             current_total_value += (amt * price)
             
@@ -56,7 +58,7 @@ def run_loop():
             df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             rsi_val = calculate_rsi(df['c'])
             
-            sys_prompt = f"Trader. RSI={rsi_val:.1f}. Kupuj < 45, Sprzedaj > 65. JSON: {{\"decision\": \"BUY/SELL/WAIT\"}}"
+            sys_prompt = f"Trader AI. RSI={rsi_val:.1f}. Kupuj < 45, Sprzedaj > 65. JSON: {{\"decision\": \"BUY/SELL/WAIT\"}}"
             chat = client.chat.completions.create(
                 messages=[{"role":"system","content":sys_prompt}], 
                 model="llama-3.1-8b-instant", 
@@ -64,10 +66,13 @@ def run_loop():
             )
             decision = json.loads(chat.choices[0].message.content).get('decision', 'WAIT')
             
+            # Kupno (Limit Order)
             if decision == "BUY" and rsi_val < 48 and usdc_free >= 100:
                 p_buy = round(price * 1.0005, 2)
                 mexc.create_order(pair, 'limit', 'buy', round(100/p_buy, 6), p_buy)
                 ai_thoughts.append(f"Kupno {symbol}")
+            
+            # Sprzedaż (Limit Order - naprawa błędu 30041)
             elif decision == "SELL" and amt > 0.0001 and rsi_val > 65:
                 p_sell = round(price * 0.999, 2) 
                 mexc.create_order(pair, 'limit', 'sell', amt, p_sell)
@@ -106,18 +111,15 @@ def get_data(range_type):
     now = datetime.now()
     if range_type == 'day':
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > now - timedelta(days=1)]
-        step = max(1, len(filtered) // 50)
+        step = max(1, len(filtered) // 60)
     elif range_type == 'week':
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > now - timedelta(days=7)]
-        step = max(1, len(filtered) // 60)
+        step = max(1, len(filtered) // 80)
     else: # month
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > now - timedelta(days=30)]
-        step = max(1, len(filtered) // 70)
+        step = max(1, len(filtered) // 100)
         
-    return jsonify({
-        "state": display_state, 
-        "history": filtered[::step]
-    })
+    return jsonify({"state": display_state, "history": filtered[::step]})
 
 @app.route('/')
 def home():
@@ -126,7 +128,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>AI Trader v8.0</title>
+        <title>AI Trader v8.1</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
@@ -146,14 +148,14 @@ def home():
         </style>
     </head>
     <body>
-        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🔴 AI TRADER v8.0</h3>
+        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🔴 AI TRADER v8.1</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
             <div class="card"><div class="label">Zysk (Real)</div><div class="value" id="profit">--</div></div>
             <div class="card"><div class="label">Portfel</div><div class="value" id="total">--</div></div>
         </div>
-        <div class="ai-box"><div id="ai_action">Analizowanie rynku...</div></div>
+        <div class="ai-box"><div id="ai_action">Ładowanie v8.1...</div></div>
         
         <div class="chart-container">
             <div class="btn-group">
@@ -181,38 +183,40 @@ def home():
             }
 
             async function update() {
-                const res = await fetch('/api/data/' + currentRange);
-                const data = await res.json();
-                
-                document.getElementById('usdc').innerText = data.state.usdc;
-                document.getElementById('total').innerText = data.state.total;
-                document.getElementById('ai_action').innerText = data.state.last_action;
-                document.getElementById('btc_amt').innerText = data.state.assets.BTC.amount;
-                document.getElementById('btc_rsi').innerText = 'RSI: ' + data.state.assets.BTC.rsi;
-                document.getElementById('eth_amt').innerText = data.state.assets.ETH.amount;
-                document.getElementById('eth_rsi').innerText = 'RSI: ' + data.state.assets.ETH.rsi;
-                
-                const pElem = document.getElementById('profit');
-                pElem.innerText = (data.state.profit >= 0 ? '+' : '') + data.state.profit + ' $';
-                pElem.className = 'value ' + (data.state.profit >= 0 ? 'profit-plus' : 'profit-minus');
+                try {
+                    const res = await fetch('/api/data/' + currentRange);
+                    const data = await res.json();
+                    
+                    document.getElementById('usdc').innerText = data.state.usdc;
+                    document.getElementById('total').innerText = data.state.total;
+                    document.getElementById('ai_action').innerText = data.state.last_action;
+                    document.getElementById('btc_amt').innerText = data.state.assets.BTC.amount;
+                    document.getElementById('btc_rsi').innerText = 'RSI: ' + data.state.assets.BTC.rsi;
+                    document.getElementById('eth_amt').innerText = data.state.assets.ETH.amount;
+                    document.getElementById('eth_rsi').innerText = 'RSI: ' + data.state.assets.ETH.rsi;
+                    
+                    const pElem = document.getElementById('profit');
+                    pElem.innerText = (data.state.profit >= 0 ? '+' : '') + data.state.profit + ' $';
+                    pElem.className = 'value ' + (data.state.profit >= 0 ? 'profit-plus' : 'profit-minus');
 
-                const labels = data.history.map(h => {
-                    const d = new Date(h.t);
-                    return currentRange === 'day' ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : d.toLocaleDateString([], {day:'numeric', month:'short'});
-                });
-                const values = data.history.map(h => h.v);
-
-                if (!chart) {
-                    chart = new Chart(document.getElementById('myChart').getContext('2d'), {
-                        type: 'line',
-                        data: { labels: labels, datasets: [{ data: values, borderColor: '#f3ba2f', tension: 0.3, fill: true, backgroundColor: 'rgba(243, 186, 47, 0.05)', pointRadius: 1 }] },
-                        options: { plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' } }, x: { grid: { display: false } } } }
+                    const labels = data.history.map(h => {
+                        const d = new Date(h.t);
+                        return currentRange === 'day' ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : d.toLocaleDateString([], {day:'numeric', month:'short'});
                     });
-                } else { 
-                    chart.data.labels = labels; 
-                    chart.data.datasets[0].data = values; 
-                    chart.update('none'); 
-                }
+                    const values = data.history.map(h => h.v);
+
+                    if (!chart) {
+                        chart = new Chart(document.getElementById('myChart').getContext('2d'), {
+                            type: 'line',
+                            data: { labels: labels, datasets: [{ data: values, borderColor: '#f3ba2f', tension: 0.3, fill: true, backgroundColor: 'rgba(243, 186, 47, 0.05)', pointRadius: 1 }] },
+                            options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' } }, x: { grid: { display: false } } } }
+                        });
+                    } else { 
+                        chart.data.labels = labels; 
+                        chart.data.datasets[0].data = values; 
+                        chart.update('none'); 
+                    }
+                } catch(e) {}
             }
             setInterval(update, 30000); update();
         </script>
