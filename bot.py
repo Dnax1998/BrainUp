@@ -21,9 +21,11 @@ mexc = ccxt.mexc({
 })
 client = Groq(api_key=os.getenv('GROQ_KEY'))
 
+# Rozszerzony stan o liczniki transakcji
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
-    "last_action": "System v8.1 gotowy...",
+    "buy_count": 0, "sell_count": 0,
+    "last_action": "System v8.2 gotowy...",
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
@@ -50,7 +52,7 @@ def run_loop():
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
             
-            # Pobieranie realnego salda (naprawa błędu 30004)
+            # Naprawa 30004: Pobieranie FAKTYCZNIE dostępnych środków
             amt = float(balance.get(symbol, {}).get('free', 0.0))
             current_total_value += (amt * price)
             
@@ -66,16 +68,18 @@ def run_loop():
             )
             decision = json.loads(chat.choices[0].message.content).get('decision', 'WAIT')
             
-            # Kupno (Limit Order)
+            # KUPNO
             if decision == "BUY" and rsi_val < 48 and usdc_free >= 100:
                 p_buy = round(price * 1.0005, 2)
                 mexc.create_order(pair, 'limit', 'buy', round(100/p_buy, 6), p_buy)
+                display_state["buy_count"] += 1
                 ai_thoughts.append(f"Kupno {symbol}")
             
-            # Sprzedaż (Limit Order - naprawa błędu 30041)
+            # SPRZEDAŻ (Naprawa 30041: Użycie LIMIT zamiast MARKET)
             elif decision == "SELL" and amt > 0.0001 and rsi_val > 65:
                 p_sell = round(price * 0.999, 2) 
                 mexc.create_order(pair, 'limit', 'sell', amt, p_sell)
+                display_state["sell_count"] += 1
                 ai_thoughts.append(f"Sprzedaż {symbol}")
             else:
                 ai_thoughts.append(f"{symbol}: RSI {rsi_val:.1f}")
@@ -83,11 +87,11 @@ def run_loop():
             assets_update[symbol] = {"amount": round(amt, 6), "rsi": round(rsi_val, 1)}
 
         profit = current_total_value - INITIAL_CAPITAL
-        display_state = {
+        display_state.update({
             "usdc": round(usdc_free, 2), "total": round(current_total_value, 2), 
             "profit": round(profit, 2), "last_action": " | ".join(ai_thoughts),
             "assets": assets_update
-        }
+        })
         
         history = []
         if os.path.exists(STATS_FILE):
@@ -98,6 +102,7 @@ def run_loop():
     except Exception as e:
         display_state["last_action"] = f"Błąd: {str(e)}"
 
+# Harmonogram
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=run_loop, trigger="interval", minutes=2)
 scheduler.start()
@@ -107,7 +112,6 @@ def get_data(range_type):
     history = []
     if os.path.exists(STATS_FILE):
         with open(STATS_FILE, 'r') as f: history = json.load(f)
-    
     now = datetime.now()
     if range_type == 'day':
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > now - timedelta(days=1)]
@@ -115,10 +119,9 @@ def get_data(range_type):
     elif range_type == 'week':
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > now - timedelta(days=7)]
         step = max(1, len(filtered) // 80)
-    else: # month
+    else:
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > now - timedelta(days=30)]
         step = max(1, len(filtered) // 100)
-        
     return jsonify({"state": display_state, "history": filtered[::step]})
 
 @app.route('/')
@@ -128,7 +131,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>AI Trader v8.1</title>
+        <title>AI Trader v8.2</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
@@ -137,6 +140,7 @@ def home():
             .card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; }
             .label { color: #848e9c; font-size: 0.75em; text-transform: uppercase; margin-bottom: 5px; }
             .value { font-size: 1.2em; font-weight: bold; }
+            .sub-label { font-size: 0.7em; color: #f3ba2f; margin-top: 8px; border-top: 1px solid #2b3139; padding-top: 5px; }
             .profit-plus { color: #0ecb81; } .profit-minus { color: #f6465d; }
             .ai-box { max-width: 600px; margin: 15px auto; padding: 12px; background: rgba(243, 186, 47, 0.1); border: 1px solid #f3ba2f; border-radius: 8px; font-size: 0.85em; text-align: center; }
             .chart-container { max-width: 600px; margin: auto; background: #1e2329; border-radius: 12px; padding: 10px; border: 1px solid #2b3139; }
@@ -148,14 +152,22 @@ def home():
         </style>
     </head>
     <body>
-        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🔴 AI TRADER v8.1</h3>
+        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🔴 AI TRADER v8.2</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
-            <div class="card"><div class="label">Zysk (Real)</div><div class="value" id="profit">--</div></div>
-            <div class="card"><div class="label">Portfel</div><div class="value" id="total">--</div></div>
+            <div class="card">
+                <div class="label">Zysk (Real)</div>
+                <div class="value" id="profit">--</div>
+                <div class="sub-label">Transakcje Sprzedaży: <b id="s_count">0</b></div>
+            </div>
+            <div class="card">
+                <div class="label">Wartość Portfela</div>
+                <div class="value" id="total">--</div>
+                <div class="sub-label">Transakcje Kupna: <b id="b_count">0</b></div>
+            </div>
         </div>
-        <div class="ai-box"><div id="ai_action">Ładowanie v8.1...</div></div>
+        <div class="ai-box"><div id="ai_action">Ładowanie danych...</div></div>
         
         <div class="chart-container">
             <div class="btn-group">
@@ -189,6 +201,8 @@ def home():
                     
                     document.getElementById('usdc').innerText = data.state.usdc;
                     document.getElementById('total').innerText = data.state.total;
+                    document.getElementById('b_count').innerText = data.state.buy_count;
+                    document.getElementById('s_count').innerText = data.state.sell_count;
                     document.getElementById('ai_action').innerText = data.state.last_action;
                     document.getElementById('btc_amt').innerText = data.state.assets.BTC.amount;
                     document.getElementById('btc_rsi').innerText = 'RSI: ' + data.state.assets.BTC.rsi;
@@ -211,11 +225,7 @@ def home():
                             data: { labels: labels, datasets: [{ data: values, borderColor: '#f3ba2f', tension: 0.3, fill: true, backgroundColor: 'rgba(243, 186, 47, 0.05)', pointRadius: 1 }] },
                             options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' } }, x: { grid: { display: false } } } }
                         });
-                    } else { 
-                        chart.data.labels = labels; 
-                        chart.data.datasets[0].data = values; 
-                        chart.update('none'); 
-                    }
+                    } else { chart.data.labels = labels; chart.data.datasets[0].data = values; chart.update('none'); }
                 } catch(e) {}
             }
             setInterval(update, 30000); update();
