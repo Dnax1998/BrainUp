@@ -6,7 +6,7 @@ import pandas as pd
 from groq import Groq
 from flask import Flask, render_template_string, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask('')
 start_time = datetime.now()
@@ -22,13 +22,15 @@ mexc = ccxt.mexc({
 })
 client = Groq(api_key=os.getenv('GROQ_KEY'))
 
+# Stan bota
 display_state = {
     "usdc": 0.0, 
     "total": 1000.0, 
-    "profit": 0.0, 
+    "profit": 0.0,
+    "last_action": "Inicjalizacja...",
     "assets": {
-        "BTC": {"amount":0, "rsi":50, "price":0}, 
-        "ETH": {"amount":0, "rsi":50, "price":0}
+        "BTC": {"amount":0, "rsi":50}, 
+        "ETH": {"amount":0, "rsi":50}
     }
 }
 
@@ -46,43 +48,62 @@ def run_loop():
     try:
         balance = mexc.fetch_balance()
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
-        current_total = usdc_free
+        
+        # Dokładne obliczanie wartości portfela na podstawie aktualnych cen
+        current_total_value = usdc_free
         assets_update = {}
+        ai_thoughts = []
 
         for symbol in ["BTC", "ETH"]:
             pair = f"{symbol}/USDC"
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
+            amt = float(balance.get(symbol, {}).get('total', 0.0))
+            
+            # Dodaj wartość posiadanych monet do sumy
+            current_total_value += (amt * price)
+            
+            # Analiza RSI
             bars = mexc.fetch_ohlcv(pair, timeframe='1m', limit=50)
             df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             rsi_val = calculate_rsi(df['c'])
-            amt = float(balance.get(symbol, {}).get('total', 0.0))
-            current_total += (amt * price)
             
-            # AI & Trade (100 USDC)
-            sys_prompt = f"Trader. RSI={rsi_val:.1f}. Kupuj < 45, Sprzedaj > 65. JSON: {{\"decision\": \"BUY/SELL/WAIT\"}}"
+            # Decyzja AI (100 USDC)
+            sys_prompt = f"Trader. RSI={rsi_val:.1f}. Kupuj < 45, Sprzedaj > 65. JSON: {{\"decision\": \"BUY/SELL/WAIT\", \"reason\": \"krótki powód\"}}"
             chat = client.chat.completions.create(messages=[{"role":"system","content":sys_prompt}], model="llama-3.1-8b-instant", response_format={"type":"json_object"})
-            decision = json.loads(chat.choices[0].message.content).get('decision', 'WAIT')
+            res = json.loads(chat.choices[0].message.content)
+            decision = res.get('decision', 'WAIT')
             
             if decision == "BUY" and rsi_val < 48 and usdc_free >= 100:
                 p = round(price * 1.001, 2)
                 mexc.create_order(pair, 'limit', 'buy', round(100/p, 6), p)
+                ai_thoughts.append(f"Kupiono {symbol} (RSI: {rsi_val:.1f})")
             elif decision == "SELL" and amt > 0 and rsi_val > 65:
                 mexc.create_market_sell_order(pair, amt)
+                ai_thoughts.append(f"Sprzedano {symbol} (RSI: {rsi_val:.1f})")
+            else:
+                ai_thoughts.append(f"{symbol}: {res.get('reason', 'Czekam')}")
 
-            assets_update[symbol] = {"amount": round(amt, 6), "rsi": round(rsi_val, 1), "price": price}
+            assets_update[symbol] = {"amount": round(amt, 6), "rsi": round(rsi_val, 1)}
 
-        profit = current_total - INITIAL_CAPITAL
-        display_state = {"usdc": round(usdc_free, 2), "total": round(current_total, 2), "profit": round(profit, 2), "assets": assets_update}
+        profit = current_total_value - INITIAL_CAPITAL
+        display_state = {
+            "usdc": round(usdc_free, 2), 
+            "total": round(current_total_value, 2), 
+            "profit": round(profit, 2), 
+            "last_action": " | ".join(ai_thoughts),
+            "assets": assets_update
+        }
         
+        # Zapis historii do wykresu
         history = []
         if os.path.exists(STATS_FILE):
             with open(STATS_FILE, 'r') as f: history = json.load(f)
-        history.append({"t": datetime.now().isoformat(), "v": round(current_total, 2)})
+        history.append({"t": datetime.now().isoformat(), "v": round(current_total_value, 2)})
         with open(STATS_FILE, 'w') as f: json.dump(history[-5000:], f)
 
     except Exception as e:
-        print(f"Błąd: {e}")
+        display_state["last_action"] = f"Błąd: {str(e)}"
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=run_loop, trigger="interval", minutes=2)
@@ -102,7 +123,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>AI Trader Pro v7.7</title>
+        <title>AI Trader Pro v7.8</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
@@ -119,16 +140,22 @@ def home():
             .asset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; max-width: 600px; margin: auto; }
             .asset-card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center;}
             .rsi-val { color: #f3ba2f; font-weight: bold; font-size: 0.9em; margin-top: 5px;}
+            .ai-box { max-width: 600px; margin: 15px auto; padding: 12px; background: rgba(243, 186, 47, 0.1); border: 1px solid #f3ba2f; border-radius: 8px; font-size: 0.85em; text-align: center; }
         </style>
     </head>
     <body>
-        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🔴 AI TRADER v7.7</h3>
+        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🔴 AI TRADER v7.8</h3>
         
         <div class="grid">
             <div class="card"><div class="label">Dostępne USDC</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
-            <div class="card"><div class="label">Zysk / Strata</div><div class="value" id="profit">--</div></div>
+            <div class="card"><div class="label">Zysk / Strata (Real)</div><div class="value" id="profit">--</div></div>
             <div class="card"><div class="label">Wartość Portfela</div><div class="value" id="total">--</div></div>
+        </div>
+
+        <div class="ai-box">
+            <div style="color: #f3ba2f; font-weight: bold; margin-bottom: 4px;">Ostatnia Akcja AI:</div>
+            <div id="ai_action">Analizowanie...</div>
         </div>
 
         <div class="chart-btn-group">
@@ -169,6 +196,7 @@ def home():
                 
                 document.getElementById('usdc').innerText = data.state.usdc;
                 document.getElementById('total').innerText = data.state.total;
+                document.getElementById('ai_action').innerText = data.state.last_action;
                 document.getElementById('btc_amt').innerText = data.state.assets.BTC.amount;
                 document.getElementById('btc_rsi').innerText = 'RSI: ' + data.state.assets.BTC.rsi;
                 document.getElementById('eth_amt').innerText = data.state.assets.ETH.amount;
