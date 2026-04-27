@@ -12,6 +12,11 @@ start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
 INITIAL_CAPITAL = 1000.0 
 
+# --- PARAMETRY ZABEZPIECZEŃ v8.3 ---
+STOP_LOSS_PCT = 0.045  # Sprzedaj, jeśli cena spadnie o 4.5% od zakupu
+TRAILING_ACTIVATE_PCT = 0.015 # Aktywuj śledzenie zysku powyżej 1.5%
+TRAILING_DROP_PCT = 0.005 # Sprzedaj, gdy zysk spadnie o 0.5% od szczytu
+
 # --- KONFIGURACJA ---
 mexc = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -21,22 +26,23 @@ mexc = ccxt.mexc({
 })
 client = Groq(api_key=os.getenv('GROQ_KEY'))
 
-# Rozszerzony stan o liczniki transakcji
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
-    "last_action": "System v8.2 gotowy...",
-    "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
+    "last_action": "System v8.3 Guardian gotowy...",
+    "assets": {"BTC": {"amount":0, "rsi":50, "entry":0.0}, "ETH": {"amount":0, "rsi":50, "entry":0.0}}
 }
 
-def calculate_rsi(prices, period=14):
-    if len(prices) < period: return 50.0
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    if loss.iloc[-1] == 0: return 100.0
-    rs = gain.iloc[-1] / loss.iloc[-1]
-    return 100 - (100 / (1 + rs))
+def calculate_indicators(df):
+    # RSI
+    delta = df['c'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi'] = 100 - (100 / (1 + rs))
+    # Zmienność (Volatility) - zmiana % w ostatnich 5 minutach
+    df['change'] = df['c'].pct_change(5) * 100
+    return df
 
 def run_loop():
     global display_state
@@ -51,40 +57,72 @@ def run_loop():
             pair = f"{symbol}/USDC"
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
-            
-            # Naprawa 30004: Pobieranie FAKTYCZNIE dostępnych środków
             amt = float(balance.get(symbol, {}).get('free', 0.0))
             current_total_value += (amt * price)
             
             bars = mexc.fetch_ohlcv(pair, timeframe='1m', limit=50)
-            df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
-            rsi_val = calculate_rsi(df['c'])
+            df = calculate_indicators(pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v']))
             
-            sys_prompt = f"Trader AI. RSI={rsi_val:.1f}. Kupuj < 45, Sprzedaj > 65. JSON: {{\"decision\": \"BUY/SELL/WAIT\"}}"
-            chat = client.chat.completions.create(
-                messages=[{"role":"system","content":sys_prompt}], 
-                model="llama-3.1-8b-instant", 
-                response_format={"type":"json_object"}
-            )
-            decision = json.loads(chat.choices[0].message.content).get('decision', 'WAIT')
+            rsi_val = round(df['rsi'].iloc[-1], 1)
+            volatility = round(df['change'].iloc[-1], 2)
             
-            # KUPNO
-            if decision == "BUY" and rsi_val < 48 and usdc_free >= 100:
-                p_buy = round(price * 1.0005, 2)
-                mexc.create_order(pair, 'limit', 'buy', round(100/p_buy, 6), p_buy)
-                display_state["buy_count"] += 1
-                ai_thoughts.append(f"Kupno {symbol}")
-            
-            # SPRZEDAŻ (Naprawa 30041: Użycie LIMIT zamiast MARKET)
-            elif decision == "SELL" and amt > 0.0001 and rsi_val > 65:
-                p_sell = round(price * 0.999, 2) 
-                mexc.create_order(pair, 'limit', 'sell', amt, p_sell)
-                display_state["sell_count"] += 1
-                ai_thoughts.append(f"Sprzedaż {symbol}")
-            else:
-                ai_thoughts.append(f"{symbol}: RSI {rsi_val:.1f}")
+            # --- LOGIKA ZABEZPIECZEŃ (STOP LOSS / TRAILING) ---
+            entry_price = display_state["assets"].get(symbol, {}).get("entry", 0.0)
+            executed_protection = False
 
-            assets_update[symbol] = {"amount": round(amt, 6), "rsi": round(rsi_val, 1)}
+            if amt > 0.0001 and entry_price > 0:
+                price_change = (price - entry_price) / entry_price
+                
+                # 1. Stop Loss
+                if price_change <= -STOP_LOSS_PCT:
+                    p_sell = round(price * 0.998, 2)
+                    mexc.create_order(pair, 'limit', 'sell', amt, p_sell)
+                    display_state["sell_count"] += 1
+                    display_state["assets"][symbol]["entry"] = 0
+                    ai_thoughts.append(f"STOP LOSS {symbol}!")
+                    executed_protection = True
+                
+                # 2. Prosty Trailing Profit (Jeśli zysk był duży i zaczyna uciekać)
+                elif price_change >= TRAILING_ACTIVATE_PCT:
+                    # Jeśli rsi zaczyna spadać z wysokich poziomów
+                    if rsi_val < 62:
+                        p_sell = round(price * 0.999, 2)
+                        mexc.create_order(pair, 'limit', 'sell', amt, p_sell)
+                        display_state["sell_count"] += 1
+                        display_state["assets"][symbol]["entry"] = 0
+                        ai_thoughts.append(f"TRAIL SELL {symbol}")
+                        executed_protection = True
+
+            if not executed_protection:
+                # --- ANALIZA AI Z FILTREM GWAŁTOWNOŚCI ---
+                sys_prompt = f"Expert Trader. RSI:{rsi_val}, Volatility:{volatility}% (5m). Jeśli Volatility < -1.5%, odradzaj kupno. JSON: {{\"decision\": \"BUY/SELL/WAIT\", \"reason\": \"...\"}}"
+                chat = client.chat.completions.create(
+                    messages=[{"role":"system","content":sys_prompt}], 
+                    model="llama-3.1-8b-instant", 
+                    response_format={"type":"json_object"}
+                )
+                res = json.loads(chat.choices[0].message.content)
+                decision = res.get('decision', 'WAIT')
+
+                # KUPNO (tylko gdy nie mamy dużej pozycji i AI pozwala)
+                if decision == "BUY" and rsi_val < 48 and usdc_free >= 10:
+                    p_buy = round(price * 1.0005, 2)
+                    mexc.create_order(pair, 'limit', 'buy', round(usdc_free/p_buy * 0.95, 6), p_buy)
+                    display_state["buy_count"] += 1
+                    display_state["assets"][symbol]["entry"] = price # Zapisujemy cenę wejścia
+                    ai_thoughts.append(f"Kupno {symbol}")
+                
+                # SPRZEDAŻ (standardowa po RSI)
+                elif decision == "SELL" and amt > 0.0001 and rsi_val > 67:
+                    p_sell = round(price * 0.999, 2) 
+                    mexc.create_order(pair, 'limit', 'sell', amt, p_sell)
+                    display_state["sell_count"] += 1
+                    display_state["assets"][symbol]["entry"] = 0
+                    ai_thoughts.append(f"Sprzedaż {symbol}")
+                else:
+                    ai_thoughts.append(f"{symbol}:{rsi_val}")
+
+            assets_update[symbol] = {"amount": round(amt, 6), "rsi": rsi_val, "entry": entry_price}
 
         profit = current_total_value - INITIAL_CAPITAL
         display_state.update({
@@ -93,6 +131,7 @@ def run_loop():
             "assets": assets_update
         })
         
+        # Zapis do historii
         history = []
         if os.path.exists(STATS_FILE):
             with open(STATS_FILE, 'r') as f: history = json.load(f)
@@ -102,7 +141,6 @@ def run_loop():
     except Exception as e:
         display_state["last_action"] = f"Błąd: {str(e)}"
 
-# Harmonogram
 scheduler = BackgroundScheduler()
 scheduler.add_job(func=run_loop, trigger="interval", minutes=2)
 scheduler.start()
@@ -131,7 +169,7 @@ def home():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>AI Trader v8.2</title>
+        <title>AI Trader v8.3 Guardian</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
@@ -140,9 +178,9 @@ def home():
             .card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; }
             .label { color: #848e9c; font-size: 0.75em; text-transform: uppercase; margin-bottom: 5px; }
             .value { font-size: 1.2em; font-weight: bold; }
-            .sub-label { font-size: 0.7em; color: #f3ba2f; margin-top: 8px; border-top: 1px solid #2b3139; padding-top: 5px; }
+            .sub-label { font-size: 0.72em; color: #f3ba2f; margin-top: 8px; border-top: 1px solid #2b3139; padding-top: 5px; }
             .profit-plus { color: #0ecb81; } .profit-minus { color: #f6465d; }
-            .ai-box { max-width: 600px; margin: 15px auto; padding: 12px; background: rgba(243, 186, 47, 0.1); border: 1px solid #f3ba2f; border-radius: 8px; font-size: 0.85em; text-align: center; }
+            .ai-box { max-width: 600px; margin: 15px auto; padding: 12px; background: rgba(243, 186, 47, 0.1); border: 1px solid #f3ba2f; border-radius: 8px; font-size: 0.85em; text-align: center; color: #f3ba2f; }
             .chart-container { max-width: 600px; margin: auto; background: #1e2329; border-radius: 12px; padding: 10px; border: 1px solid #2b3139; }
             .btn-group { display: flex; justify-content: center; gap: 5px; margin-bottom: 10px; }
             button { background: #2b3139; color: #848e9c; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.75em; }
@@ -152,22 +190,22 @@ def home():
         </style>
     </head>
     <body>
-        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🔴 AI TRADER v8.2</h3>
+        <h3 style="color: #f3ba2f; text-align:center; margin-bottom: 15px;">🛡️ AI TRADER v8.3 GUARDIAN</h3>
         <div class="grid">
-            <div class="card"><div class="label">USDC</div><div class="value" id="usdc">--</div></div>
+            <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
             <div class="card">
                 <div class="label">Zysk (Real)</div>
                 <div class="value" id="profit">--</div>
-                <div class="sub-label">Transakcje Sprzedaży: <b id="s_count">0</b></div>
+                <div class="sub-label">Sprzedaże: <b id="s_count">0</b></div>
             </div>
             <div class="card">
                 <div class="label">Wartość Portfela</div>
                 <div class="value" id="total">--</div>
-                <div class="sub-label">Transakcje Kupna: <b id="b_count">0</b></div>
+                <div class="sub-label">Kupna: <b id="b_count">0</b></div>
             </div>
         </div>
-        <div class="ai-box"><div id="ai_action">Ładowanie danych...</div></div>
+        <div class="ai-box"><b>Status AI:</b> <span id="ai_action">Analiza...</span></div>
         
         <div class="chart-container">
             <div class="btn-group">
@@ -179,8 +217,16 @@ def home():
         </div>
 
         <div class="asset-grid">
-            <div class="asset-card"><div style="color:#f3ba2f; font-weight:bold;">BTC</div><div id="btc_amt" class="value">--</div><div id="btc_rsi" style="color:#848e9c; font-size:0.8em;">RSI: --</div></div>
-            <div class="asset-card"><div style="color:#f3ba2f; font-weight:bold;">ETH</div><div id="eth_amt" class="value">--</div><div id="eth_rsi" style="color:#848e9c; font-size:0.8em;">RSI: --</div></div>
+            <div class="asset-card">
+                <div style="color:#f3ba2f; font-weight:bold;">BTC</div>
+                <div id="btc_amt" class="value">--</div>
+                <div id="btc_rsi" style="color:#848e9c; font-size:0.8em; margin-top:5px;">RSI: --</div>
+            </div>
+            <div class="asset-card">
+                <div style="color:#f3ba2f; font-weight:bold;">ETH</div>
+                <div id="eth_amt" class="value">--</div>
+                <div id="eth_rsi" style="color:#848e9c; font-size:0.8em; margin-top:5px;">RSI: --</div>
+            </div>
         </div>
 
         <script>
