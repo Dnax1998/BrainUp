@@ -104,16 +104,17 @@ def get_data(range_type):
         limit = now - timedelta(days=1)
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
         step = max(1, len(filtered) // 24)
+        return jsonify({"state": display_state, "history": filtered[::step][:24]})
     elif range_type == 'week':
         limit = now - timedelta(days=7)
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
         step = max(1, len(filtered) // 14)
+        return jsonify({"state": display_state, "history": filtered[::step][:14]})
     else: 
         limit = now - timedelta(days=30)
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
         step = max(1, len(filtered) // 30)
-        
-    return jsonify({"state": display_state, "history": filtered[::step]})
+        return jsonify({"state": display_state, "history": filtered[::step][:30]})
 
 @app.route('/')
 def home():
@@ -179,7 +180,6 @@ def home():
                 document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
                 document.getElementById('eth_rsi').innerText = 'RSI: '+d.state.assets.ETH.rsi;
                 
-                // POPRAWIONE FORMATOWANIE CZASU
                 const labels = d.history.map(h => {
                     const dt = new Date(h.t);
                     if(currentRange === 'day') return dt.getHours() + ':' + dt.getMinutes().toString().padStart(2, '0');
