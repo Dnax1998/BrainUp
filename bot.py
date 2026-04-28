@@ -10,9 +10,9 @@ from groq import Groq
 app = Flask('')
 start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
-INITIAL_CAPITAL = 1000.0 
 
-# --- KONFIGURACJA HANDLU (HYBRYDA GUARDIAN + PLATINUM) ---
+# --- KONFIGURACJA HANDLU (WERSJA 10.1) ---
+INITIAL_CAPITAL = 1000.0       # Twoja kwota bazowa
 TRADE_AMOUNT_USDC = 120.0      
 RSI_BUY_THRESHOLD = 50         
 RSI_SELL_THRESHOLD = 58        
@@ -74,15 +74,15 @@ def run_loop():
             current_total += (amt * price)
             rsi_val = calculate_rsi(symbol)
             
-            # --- LOGIKA HANDLU (NAPRAWA 30041 + TRYB GUARDIAN) ---
+            # --- LOGIKA HANDLU HYBRYDOWEGO (PLATINUM + GUARDIAN) ---
             if amt * price < 10.0: 
-                if rsi_val < 35:
+                if rsi_val < 35: # Tryb Guardian: Kupuj agresywnie
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
                     if usdc_free >= TRADE_AMOUNT_USDC:
                         mexc.create_order(pair, 'limit', 'buy', qty, price)
                         display_state["buy_count"] += 1
                         ai_reports.append(f"🛡️ {symbol}: KUPNO GUARDIAN (RSI {rsi_val})")
-                elif rsi_val < RSI_BUY_THRESHOLD:
+                elif rsi_val < RSI_BUY_THRESHOLD: # Tryb AI: Kupuj ostrożnie
                     if ask_ai_decision(symbol, price, rsi_val):
                         qty = round(TRADE_AMOUNT_USDC / price, 6)
                         if usdc_free >= TRADE_AMOUNT_USDC:
@@ -133,6 +133,7 @@ def get_data(range_type):
     if not history: return jsonify({"state": display_state, "history": []})
     now = datetime.now()
     points = []
+    
     if range_type == 'day':
         for i in range(23, -1, -1):
             target = now - timedelta(hours=i)
@@ -148,13 +149,14 @@ def get_data(range_type):
             target = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0)
             match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
             points.append({"t": target.strftime("%d/%m"), "v": match['v']})
+            
     return jsonify({"state": display_state, "history": points})
 
 @app.route('/')
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v10.0 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v10.1 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -174,14 +176,14 @@ def home():
     </style></head>
     <body>
         <div id="timer">Aktualizacja: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.0 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.1 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
             <div class="card"><div class="label">Zysk / Strata</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
             <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
-        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Analiza rynku...</span></div>
+        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Skanowanie rynku...</span></div>
         <div class="chart-container">
             <div class="btn-group">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
