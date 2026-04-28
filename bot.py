@@ -12,10 +12,10 @@ start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
 INITIAL_CAPITAL = 1000.0 
 
-# --- AGRESYWNA KONFIGURACJA HANDLU ---
-TRADE_AMOUNT_USDC = 120.0      # Mniejsza kwota = częstsze wejścia
-RSI_BUY_THRESHOLD = 50         # Reaguj szybciej (standard był 35)
-RSI_SELL_THRESHOLD = 58        # Szybsza realizacja zysku (standard był 70)
+# --- KONFIGURACJA HANDLU (HYBRYDA GUARDIAN + PLATINUM) ---
+TRADE_AMOUNT_USDC = 120.0      
+RSI_BUY_THRESHOLD = 50         
+RSI_SELL_THRESHOLD = 58        
 
 mexc = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -74,15 +74,24 @@ def run_loop():
             current_total += (amt * price)
             rsi_val = calculate_rsi(symbol)
             
-            # LOGIKA HANDLU (AGRESYWNA)
+            # --- LOGIKA HANDLU (GUARDIAN MODE) ---
             if amt * price < 10.0: 
-                if rsi_val < RSI_BUY_THRESHOLD:
+                # TRIGGER 1: Ekstremalny dołek (Kupuj bez pytania AI)
+                if rsi_val < 35:
+                    qty = round(TRADE_AMOUNT_USDC / price, 6)
+                    if usdc_free >= TRADE_AMOUNT_USDC:
+                        mexc.create_order(pair, 'market', 'buy', qty)
+                        display_state["buy_count"] += 1
+                        ai_reports.append(f"🛡️ {symbol}: KUPNO GUARDIAN (RSI {rsi_val})")
+                
+                # TRIGGER 2: Lekki spadek (Kupuj za zgodą AI)
+                elif rsi_val < RSI_BUY_THRESHOLD:
                     if ask_ai_decision(symbol, price, rsi_val):
                         qty = round(TRADE_AMOUNT_USDC / price, 6)
                         if usdc_free >= TRADE_AMOUNT_USDC:
                             mexc.create_order(pair, 'market', 'buy', qty)
                             display_state["buy_count"] += 1
-                            ai_reports.append(f"🚀 {symbol}: KUPIONO (RSI {rsi_val})")
+                            ai_reports.append(f"🚀 {symbol}: KUPNO AI (RSI {rsi_val})")
                     else:
                         ai_reports.append(f"⚖️ {symbol}: AI czeka (RSI {rsi_val})")
                 else:
@@ -149,7 +158,7 @@ def get_data(range_type):
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v9.8 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v9.9 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -169,14 +178,14 @@ def home():
     </style></head>
     <body>
         <div id="timer">Aktualizacja: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v9.8 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v9.9 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
             <div class="card"><div class="label">Zysk / Strata</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
             <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
-        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Skalowanie trendów...</span></div>
+        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Inicjalizacja strategii...</span></div>
         <div class="chart-container">
             <div class="btn-group">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
