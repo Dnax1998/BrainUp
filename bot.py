@@ -28,7 +28,7 @@ mexc = ccxt.mexc({
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
-    "last_action": "System v8.6 Gotowy...",
+    "last_action": "System v8.6 Online",
     "assets": {"BTC": {"amount":0, "rsi":50, "entry":0.0}, "ETH": {"amount":0, "rsi":50, "entry":0.0}}
 }
 
@@ -108,7 +108,7 @@ def get_data(range_type):
         limit = now - timedelta(days=7)
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
         step = max(1, len(filtered) // 14)
-    else: # month
+    else: 
         limit = now - timedelta(days=30)
         filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
         step = max(1, len(filtered) // 30)
@@ -178,14 +178,19 @@ def home():
                 document.getElementById('btc_rsi').innerText = 'RSI: '+d.state.assets.BTC.rsi;
                 document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
                 document.getElementById('eth_rsi').innerText = 'RSI: '+d.state.assets.ETH.rsi;
+                
+                // POPRAWIONE FORMATOWANIE CZASU
                 const labels = d.history.map(h => {
                     const dt = new Date(h.t);
-                    return currentRange==='day' ? dt.getHours()+':00' : (currentRange==='week' ? dt.getDate()+'/'+(dt.getMonth()+1)+' '+dt.getHours()+'h' : dt.getDate()+'/'+(dt.getMonth()+1));
+                    if(currentRange === 'day') return dt.getHours() + ':' + dt.getMinutes().toString().padStart(2, '0');
+                    if(currentRange === 'week') return dt.getDate() + '/' + (dt.getMonth()+1) + ' ' + dt.getHours() + ':00';
+                    return dt.getDate() + '/' + (dt.getMonth()+1);
                 });
+
                 if(!chart) {
                     chart = new Chart(document.getElementById('myChart'), {
                         type:'line', data:{labels:labels, datasets:[{data:d.history.map(h=>h.v), borderColor:'#f3ba2f', tension:0.3, fill:true, backgroundColor:'rgba(243,186,47,0.05)', pointRadius:2}]},
-                        options:{animation:false, plugins:{legend:{display:false}}, scales:{y:{grid:{color:'#2b3139'}}, x:{grid:{display:false}}}}
+                        options:{animation:false, plugins:{legend:{display:false}}, scales:{y:{grid:{color:'#2b3139'}}, x:{ticks:{maxRotation:45, minRotation:45, font:{size:9}}, grid:{display:false}}}}
                     });
                 } else { chart.data.labels = labels; chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
             }
