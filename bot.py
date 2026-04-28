@@ -93,28 +93,45 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(run_loop, 'interval', minutes=2)
 scheduler.start()
 
+# --- POPRAWIONA LOGIKA FILTROWANIA DANYCH ---
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
     history = []
     if os.path.exists(STATS_FILE):
         with open(STATS_FILE, 'r') as f: history = json.load(f)
-    
+    if not history: return jsonify({"state": display_state, "history": []})
+
     now = datetime.now()
+    final_history = []
+    
     if range_type == 'day':
-        limit = now - timedelta(days=1)
-        filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
-        step = max(1, len(filtered) // 24)
-        return jsonify({"state": display_state, "history": filtered[::step][:24]})
+        # Szukaj punktów co pełną godzinę z ostatnich 24h
+        for i in range(23, -1, -1):
+            target_time = now - timedelta(hours=i)
+            # Znajdź najbliższy zapisany punkt czasowy
+            closest = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target_time).total_seconds()))
+            # Dodaj tylko jeśli punkt mieści się w marginesie 10 minut od pełnej godziny
+            if abs((datetime.fromisoformat(closest['t']) - target_time).total_seconds()) < 600:
+                final_history.append(closest)
+        return jsonify({"state": display_state, "history": final_history[:24]})
+
     elif range_type == 'week':
-        limit = now - timedelta(days=7)
-        filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
-        step = max(1, len(filtered) // 14)
-        return jsonify({"state": display_state, "history": filtered[::step][:14]})
-    else: 
-        limit = now - timedelta(days=30)
-        filtered = [h for h in history if datetime.fromisoformat(h['t']) > limit]
-        step = max(1, len(filtered) // 30)
-        return jsonify({"state": display_state, "history": filtered[::step][:30]})
+        # Szukaj punktów co 12h z ostatnich 7 dni
+        for i in range(13, -1, -1):
+            target_time = now - timedelta(hours=i*12)
+            closest = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target_time).total_seconds()))
+            if abs((datetime.fromisoformat(closest['t']) - target_time).total_seconds()) < 3600:
+                final_history.append(closest)
+        return jsonify({"state": display_state, "history": final_history[:14]})
+
+    else: # month
+        # Szukaj punktów co 24h z ostatnich 30 dni
+        for i in range(29, -1, -1):
+            target_time = now - timedelta(days=i)
+            closest = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target_time).total_seconds()))
+            if abs((datetime.fromisoformat(closest['t']) - target_time).total_seconds()) < 7200:
+                final_history.append(closest)
+        return jsonify({"state": display_state, "history": final_history[:30]})
 
 @app.route('/')
 def home():
@@ -182,7 +199,7 @@ def home():
                 
                 const labels = d.history.map(h => {
                     const dt = new Date(h.t);
-                    if(currentRange === 'day') return dt.getHours() + ':' + dt.getMinutes().toString().padStart(2, '0');
+                    if(currentRange === 'day') return dt.getHours() + ':00';
                     if(currentRange === 'week') return dt.getDate() + '/' + (dt.getMonth()+1) + ' ' + dt.getHours() + ':00';
                     return dt.getDate() + '/' + (dt.getMonth()+1);
                 });
