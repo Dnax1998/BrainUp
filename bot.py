@@ -60,6 +60,7 @@ def ask_ai_decision(symbol, price, rsi):
 def run_loop():
     global display_state
     try:
+        # 1. POBIERZ BALANS NA START (Naprawia wyświetlanie salda)
         balance = mexc.fetch_balance()
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
         current_total = usdc_free
@@ -74,22 +75,21 @@ def run_loop():
             current_total += (amt * price)
             rsi_val = calculate_rsi(symbol)
             
-            # --- LOGIKA HANDLU (GUARDIAN MODE) ---
+            # --- LOGIKA HANDLU (NAPRAWIONA DLA MEXC) ---
             if amt * price < 10.0: 
-                # TRIGGER 1: Ekstremalny dołek (Kupuj bez pytania AI)
                 if rsi_val < 35:
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
                     if usdc_free >= TRADE_AMOUNT_USDC:
-                        mexc.create_order(pair, 'market', 'buy', qty)
+                        # Zlecenie LIMIT zamiast MARKET (Naprawia błąd 30041)
+                        mexc.create_order(pair, 'limit', 'buy', qty, price)
                         display_state["buy_count"] += 1
                         ai_reports.append(f"🛡️ {symbol}: KUPNO GUARDIAN (RSI {rsi_val})")
                 
-                # TRIGGER 2: Lekki spadek (Kupuj za zgodą AI)
                 elif rsi_val < RSI_BUY_THRESHOLD:
                     if ask_ai_decision(symbol, price, rsi_val):
                         qty = round(TRADE_AMOUNT_USDC / price, 6)
                         if usdc_free >= TRADE_AMOUNT_USDC:
-                            mexc.create_order(pair, 'market', 'buy', qty)
+                            mexc.create_order(pair, 'limit', 'buy', qty, price)
                             display_state["buy_count"] += 1
                             ai_reports.append(f"🚀 {symbol}: KUPNO AI (RSI {rsi_val})")
                     else:
@@ -98,7 +98,7 @@ def run_loop():
                     ai_reports.append(f"🔍 {symbol}: RSI {rsi_val}")
             else: 
                 if rsi_val > RSI_SELL_THRESHOLD:
-                    mexc.create_order(pair, 'market', 'sell', amt)
+                    mexc.create_order(pair, 'limit', 'sell', amt, price)
                     display_state["sell_count"] += 1
                     ai_reports.append(f"💰 {symbol}: SPRZEDANO (RSI {rsi_val})")
                 else:
@@ -106,6 +106,7 @@ def run_loop():
 
             assets_update[symbol] = {"amount": round(amt, 6), "rsi": rsi_val}
 
+        # AKTUALIZACJA STANU WYSWIETLANIA
         display_state.update({
             "usdc": round(usdc_free, 2), "total": round(current_total, 2), 
             "profit": round(current_total - INITIAL_CAPITAL, 2),
@@ -113,6 +114,7 @@ def run_loop():
             "assets": assets_update
         })
         
+        # ZAPIS HISTORII DO WYKRESU
         history = []
         if os.path.exists(STATS_FILE):
             with open(STATS_FILE, 'r') as f:
@@ -120,7 +122,8 @@ def run_loop():
                 except: history = []
         
         history.append({"t": datetime.now().isoformat(), "v": round(current_total, 2)})
-        with open(STATS_FILE, 'w') as f: json.dump(history[-20000:], f)
+        with open(STATS_FILE, 'w') as f: json.dump(history[-1000:], f)
+        
     except Exception as e: 
         display_state["last_action"] = f"Błąd: {str(e)}"
 
@@ -135,30 +138,21 @@ def get_data(range_type):
         try: history = json.load(f)
         except: history = []
     if not history: return jsonify({"state": display_state, "history": []})
+    
+    # Zwracamy surowe dane dla wykresu, żeby zaczął działać od razu
     now = datetime.now()
     points = []
-    if range_type == 'day':
-        for i in range(23, -1, -1):
-            target = now - timedelta(hours=i)
-            match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
-            points.append({"t": target.strftime("%H:00"), "v": match['v']})
-    elif range_type == 'week':
-        for i in range(13, -1, -1):
-            target = now - timedelta(hours=i*12)
-            match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
-            points.append({"t": target.strftime("%d/%m %Hh"), "v": match['v']})
-    elif range_type == 'month':
-        for i in range(29, -1, -1):
-            target = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0)
-            match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
-            points.append({"t": target.strftime("%d/%m"), "v": match['v']})
+    # Filtrowanie punktów dla osi czasu
+    for h in history[-20:]: 
+        dt = datetime.fromisoformat(h['t'])
+        points.append({"t": dt.strftime("%H:%M"), "v": h['v']})
     return jsonify({"state": display_state, "history": points})
 
 @app.route('/')
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v9.9 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v9.9.1 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -178,19 +172,17 @@ def home():
     </style></head>
     <body>
         <div id="timer">Aktualizacja: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v9.9 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v9.9.1 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
             <div class="card"><div class="label">Zysk / Strata</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
             <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
-        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Inicjalizacja strategii...</span></div>
+        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Inicjalizacja...</span></div>
         <div class="chart-container">
             <div class="btn-group">
-                <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
-                <button id="b-week" onclick="changeRange('week')">Tydzień</button>
-                <button id="b-month" onclick="changeRange('month')">Miesiąc</button>
+                <button id="b-day" onclick="changeRange('day')" class="active">Na Żywo</button>
             </div>
             <canvas id="myChart"></canvas>
         </div>
@@ -202,8 +194,6 @@ def home():
             let chart; let currentRange = 'day';
             function changeRange(r) { currentRange = r; update(); }
             async function update() {
-                document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-                document.getElementById('b-'+currentRange).classList.add('active');
                 const res = await fetch('/api/data/'+currentRange); const d = await res.json();
                 document.getElementById('usdc').innerText = d.state.usdc + ' $';
                 document.getElementById('total').innerText = d.state.total + ' $';
@@ -215,12 +205,15 @@ def home():
                 const pEl = document.getElementById('profit');
                 pEl.innerText = (d.state.profit>=0?'+':'') + d.state.profit + ' $';
                 pEl.style.color = d.state.profit>=0?'#0ecb81':'#f6465d';
-                if(!chart) {
-                    chart = new Chart(document.getElementById('myChart'), {
-                        type:'line', data:{labels:d.history.map(h=>h.t), datasets:[{data:d.history.map(h=>h.v), borderColor:'#f3ba2f', tension:0.4, fill:true, backgroundColor:'rgba(243,186,47,0.1)'}]},
-                        options:{animation:false, plugins:{legend:{display:false}}, scales:{y:{grid:{color:'#2b3139'}}, x:{grid:{display:false}}}}
-                    });
-                } else { chart.data.labels = d.history.map(h=>h.t); chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
+                
+                if(d.history.length > 0) {
+                    if(!chart) {
+                        chart = new Chart(document.getElementById('myChart'), {
+                            type:'line', data:{labels:d.history.map(h=>h.t), datasets:[{data:d.history.map(h=>h.v), borderColor:'#f3ba2f', tension:0.4, fill:true, backgroundColor:'rgba(243,186,47,0.1)'}]},
+                            options:{animation:false, plugins:{legend:{display:false}}, scales:{y:{grid:{color:'#2b3139'}}, x:{grid:{display:false}}}}
+                        });
+                    } else { chart.data.labels = d.history.map(h=>h.t); chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
+                }
             }
             setInterval(update, 30000); update();
         </script>
