@@ -11,7 +11,7 @@ start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
 INITIAL_CAPITAL = 1000.0 
 
-# --- KONFIGURACJA AGRESYWNA v8.6 ---
+# --- KONFIGURACJA v8.6 ---
 TRADE_AMOUNT_USDC = 250.0      
 STOP_LOSS_PCT = 0.04           
 TRAILING_ACTIVATE_PCT = 0.025  
@@ -28,7 +28,7 @@ mexc = ccxt.mexc({
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
-    "last_action": "System v8.6 Online",
+    "last_action": "Inicjalizacja systemu...",
     "assets": {"BTC": {"amount":0, "rsi":50, "entry":0.0}, "ETH": {"amount":0, "rsi":50, "entry":0.0}}
 }
 
@@ -63,7 +63,7 @@ def run_loop():
 
             if amt > 0.0001 and entry > 0:
                 change = (price - entry) / entry
-                if change <= -STOP_LOSS_PCT or rsi_val > RSI_SELL_THRESHOLD or (change > TRAILING_ACTIVATE_PCT and rsi_val < 55):
+                if change <= -STOP_LOSS_PCT or rsi_val > RSI_SELL_THRESHOLD:
                     mexc.create_order(pair, 'limit', 'sell', amt, round(price * 0.999, 2))
                     display_state["sell_count"] += 1; entry = 0; actions.append(f"SELL {symbol}")
 
@@ -78,7 +78,7 @@ def run_loop():
         display_state.update({
             "usdc": round(usdc_free, 2), "total": round(current_total, 2), 
             "profit": round(current_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(actions) if actions else f"BTC: {assets_update['BTC']['rsi']} | ETH: {assets_update['ETH']['rsi']}",
+            "last_action": " | ".join(actions) if actions else f"Status: BTC {assets_update['BTC']['rsi']} RSI",
             "assets": assets_update
         })
         
@@ -90,10 +90,9 @@ def run_loop():
     except Exception as e: display_state["last_action"] = f"Error: {str(e)}"
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(run_loop, 'interval', minutes=2)
+scheduler.add_job(run_loop, 'interval', minutes=1)
 scheduler.start()
 
-# --- POPRAWIONA LOGIKA FILTROWANIA DANYCH ---
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
     history = []
@@ -103,47 +102,52 @@ def get_data(range_type):
 
     now = datetime.now()
     final_history = []
-    
+    used_indices = set()
+
+    def get_closest(target_time, margin_seconds):
+        best_idx = -1
+        min_diff = margin_seconds
+        for idx, item in enumerate(history):
+            if idx in used_indices: continue
+            diff = abs((datetime.fromisoformat(item['t']) - target_time).total_seconds())
+            if diff < min_diff:
+                min_diff = diff
+                best_idx = idx
+        if best_idx != -1:
+            used_indices.add(best_idx)
+            return history[best_idx]
+        return None
+
     if range_type == 'day':
-        # Szukaj punktów co pełną godzinę z ostatnich 24h
         for i in range(23, -1, -1):
-            target_time = now - timedelta(hours=i)
-            # Znajdź najbliższy zapisany punkt czasowy
-            closest = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target_time).total_seconds()))
-            # Dodaj tylko jeśli punkt mieści się w marginesie 10 minut od pełnej godziny
-            if abs((datetime.fromisoformat(closest['t']) - target_time).total_seconds()) < 600:
-                final_history.append(closest)
-        return jsonify({"state": display_state, "history": final_history[:24]})
-
+            t = now - timedelta(hours=i)
+            if t > datetime.now(): continue
+            point = get_closest(t, 3599)
+            if point: final_history.append(point)
     elif range_type == 'week':
-        # Szukaj punktów co 12h z ostatnich 7 dni
         for i in range(13, -1, -1):
-            target_time = now - timedelta(hours=i*12)
-            closest = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target_time).total_seconds()))
-            if abs((datetime.fromisoformat(closest['t']) - target_time).total_seconds()) < 3600:
-                final_history.append(closest)
-        return jsonify({"state": display_state, "history": final_history[:14]})
-
-    else: # month
-        # Szukaj punktów co 24h z ostatnich 30 dni
+            t = now - timedelta(hours=i*12)
+            point = get_closest(t, 43199)
+            if point: final_history.append(point)
+    else: 
         for i in range(29, -1, -1):
-            target_time = now - timedelta(days=i)
-            closest = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target_time).total_seconds()))
-            if abs((datetime.fromisoformat(closest['t']) - target_time).total_seconds()) < 7200:
-                final_history.append(closest)
-        return jsonify({"state": display_state, "history": final_history[:30]})
+            t = now - timedelta(days=i)
+            point = get_closest(t, 86399)
+            if point: final_history.append(point)
+            
+    return jsonify({"state": display_state, "history": final_history})
 
 @app.route('/')
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>AI TRADER v8.6 Classic</title>
+    <!DOCTYPE html><html><head><title>AI TRADER v8.6 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { background: #0b0e11; color: white; font-family: sans-serif; padding: 15px; margin: 0; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 600px; margin: auto; }
-        .card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; }
+        .card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; position: relative; }
         .label { color: #848e9c; font-size: 0.75em; text-transform: uppercase; margin-bottom: 5px; }
         .value { font-size: 1.2em; font-weight: bold; }
         .sub-label { font-size: 0.72em; color: #f3ba2f; margin-top: 8px; border-top: 1px solid #2b3139; padding-top: 5px; }
@@ -153,8 +157,10 @@ def home():
         button { background: #2b3139; color: #848e9c; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
         button.active { background: #f3ba2f; color: black; font-weight: bold; }
         .asset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 600px; margin: 15px auto; }
+        #timer { position: fixed; top: 10px; right: 10px; background: #f3ba2f; color: black; padding: 2px 8px; border-radius: 20px; font-size: 0.7em; font-weight: bold; z-index: 100; }
     </style></head>
     <body>
+        <div id="timer">Aktualizacja: 30s</div>
         <h3 style="color: #f3ba2f; text-align:center;">💎 AI TRADER v8.6 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
@@ -177,41 +183,58 @@ def home():
         </div>
         <script>
             let chart; let currentRange = 'day';
+            let timeLeft = 30;
+
+            function startTimer() {
+                setInterval(() => {
+                    timeLeft--;
+                    if(timeLeft <= 0) timeLeft = 30;
+                    document.getElementById('timer').innerText = 'Aktualizacja: ' + timeLeft + 's';
+                }, 1000);
+            }
+
             function changeRange(r) {
                 currentRange = r;
                 document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
                 document.getElementById('b-'+r).classList.add('active');
                 update();
             }
-            async function update() {
-                const res = await fetch('/api/data/'+currentRange); const d = await res.json();
-                document.getElementById('usdc').innerText = d.state.usdc;
-                document.getElementById('total').innerText = d.state.total;
-                document.getElementById('profit').innerText = (d.state.profit>=0?'+':'')+d.state.profit+' $';
-                document.getElementById('profit').style.color = d.state.profit>=0?'#0ecb81':'#f6465d';
-                document.getElementById('b_count').innerText = d.state.buy_count;
-                document.getElementById('s_count').innerText = d.state.sell_count;
-                document.getElementById('ai_action').innerText = d.state.last_action;
-                document.getElementById('btc_amt').innerText = d.state.assets.BTC.amount;
-                document.getElementById('btc_rsi').innerText = 'RSI: '+d.state.assets.BTC.rsi;
-                document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
-                document.getElementById('eth_rsi').innerText = 'RSI: '+d.state.assets.ETH.rsi;
-                
-                const labels = d.history.map(h => {
-                    const dt = new Date(h.t);
-                    if(currentRange === 'day') return dt.getHours() + ':00';
-                    if(currentRange === 'week') return dt.getDate() + '/' + (dt.getMonth()+1) + ' ' + dt.getHours() + ':00';
-                    return dt.getDate() + '/' + (dt.getMonth()+1);
-                });
 
-                if(!chart) {
-                    chart = new Chart(document.getElementById('myChart'), {
-                        type:'line', data:{labels:labels, datasets:[{data:d.history.map(h=>h.v), borderColor:'#f3ba2f', tension:0.3, fill:true, backgroundColor:'rgba(243,186,47,0.05)', pointRadius:2}]},
-                        options:{animation:false, plugins:{legend:{display:false}}, scales:{y:{grid:{color:'#2b3139'}}, x:{ticks:{maxRotation:45, minRotation:45, font:{size:9}}, grid:{display:false}}}}
+            async function update() {
+                try {
+                    const res = await fetch('/api/data/'+currentRange); 
+                    const d = await res.json();
+                    document.getElementById('usdc').innerText = d.state.usdc;
+                    document.getElementById('total').innerText = d.state.total;
+                    document.getElementById('profit').innerText = (d.state.profit>=0?'+':'')+d.state.profit+' $';
+                    document.getElementById('profit').style.color = d.state.profit>=0?'#0ecb81':'#f6465d';
+                    document.getElementById('b_count').innerText = d.state.buy_count;
+                    document.getElementById('s_count').innerText = d.state.sell_count;
+                    document.getElementById('ai_action').innerText = d.state.last_action;
+                    document.getElementById('btc_amt').innerText = d.state.assets.BTC.amount;
+                    document.getElementById('btc_rsi').innerText = 'RSI: '+d.state.assets.BTC.rsi;
+                    document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
+                    document.getElementById('eth_rsi').innerText = 'RSI: '+d.state.assets.ETH.rsi;
+                    
+                    const labels = d.history.map(h => {
+                        const dt = new Date(h.t);
+                        if(currentRange === 'day') return dt.getHours() + ':00';
+                        if(currentRange === 'week') return dt.getDate() + '/' + (dt.getMonth()+1) + ' ' + dt.getHours() + ':00';
+                        return dt.getDate() + '/' + (dt.getMonth()+1);
                     });
-                } else { chart.data.labels = labels; chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
+
+                    if(!chart) {
+                        chart = new Chart(document.getElementById('myChart'), {
+                            type:'line', data:{labels:labels, datasets:[{data:d.history.map(h=>h.v), borderColor:'#f3ba2f', tension:0.3, fill:true, backgroundColor:'rgba(243,186,47,0.05)', pointRadius:3}]},
+                            options:{animation:false, plugins:{legend:{display:false}}, scales:{y:{grid:{color:'#2b3139'}}, x:{ticks:{maxRotation:45, minRotation:45, font:{size:9}}, grid:{display:false}}}}
+                        });
+                    } else { chart.data.labels = labels; chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
+                } catch(e) { console.error("Update failed", e); }
             }
-            setInterval(update, 30000); update();
+
+            setInterval(update, 30000); 
+            update();
+            startTimer();
         </script>
     </body></html>
     """)
