@@ -13,7 +13,7 @@ STATS_FILE = 'balance_history.json'
 
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0       
-TRADE_AMOUNT_USDC = 250.0      
+TRADE_AMOUNT_USDC = 120.0      
 RSI_BUY_THRESHOLD = 50         
 RSI_SELL_THRESHOLD = 58        
 
@@ -29,7 +29,7 @@ groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
-    "last_action": "Inicjalizacja...",
+    "last_action": "Synchronizacja...",
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
@@ -49,10 +49,7 @@ def run_loop():
     global display_state
     try:
         balance = mexc.fetch_balance()
-        # Pobieramy faktyczne wolne środki USDC
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
-        
-        # Startujemy wyliczanie całkowitej wartości od wolnego USDC
         calculated_total = usdc_free 
         assets_update = {}
         ai_reports = []
@@ -61,16 +58,10 @@ def run_loop():
             pair = f"{symbol}/USDC"
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
-            
-            # POBIERAMY CAŁKOWITĄ ILOŚĆ MONETY (FREE + USED)
             total_amt = float(balance.get(symbol, {}).get('total', 0.0))
-            
-            # DODAJEMY WARTOŚĆ RYNKOWĄ DO SUMY PORTFELA
             calculated_total += (total_amt * price)
-            
             rsi_val = calculate_rsi(symbol)
             
-            # LOGIKA HANDLU (Zlecenia LIMIT dla MEXC)
             if total_amt * price < 10.0: 
                 if rsi_val < 35:
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
@@ -86,7 +77,6 @@ def run_loop():
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
-        # AKTUALIZACJA DISPLAY STATE - KLUCZ DO POPRAWNYCH LICZB
         display_state.update({
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
@@ -95,7 +85,6 @@ def run_loop():
             "assets": assets_update
         })
         
-        # Historia do wykresu
         history = []
         if os.path.exists(STATS_FILE):
             with open(STATS_FILE, 'r') as f:
@@ -104,7 +93,7 @@ def run_loop():
         history.append({"t": datetime.now().isoformat(), "v": round(calculated_total, 2)})
         with open(STATS_FILE, 'w') as f: json.dump(history[-20000:], f)
     except Exception as e: 
-        display_state["last_action"] = f"Błąd danych: {str(e)}"
+        display_state["last_action"] = f"Błąd: {str(e)}"
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(run_loop, 'interval', minutes=1)
@@ -123,14 +112,18 @@ def get_data(range_type):
             target = now - timedelta(hours=i)
             match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
             points.append({"t": target.strftime("%H:00"), "v": match['v']})
-    # ... (pozostałe zakresy week/month bez zmian)
+    elif range_type == 'week':
+        for i in range(13, -1, -1):
+            target = now - timedelta(hours=i*12)
+            match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
+            points.append({"t": target.strftime("%d/%m %Hh"), "v": match['v']})
     return jsonify({"state": display_state, "history": points})
 
 @app.route('/')
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v10.3 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v10.4 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -139,16 +132,16 @@ def home():
         .card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; }
         .label { color: #848e9c; font-size: 0.75em; text-transform: uppercase; }
         .value { font-size: 1.2em; font-weight: bold; margin-top: 5px; }
-        .chart-container { max-width: 600px; margin: 15px auto; background: #1e2329; border-radius: 12px; padding: 10px; border: 1px solid #2b3139; }
-        #timer { position: fixed; top: 10px; right: 10px; background: #f3ba2f; color: black; padding: 3px 10px; border-radius: 20px; font-size: 0.75em; font-weight: bold; }
-        .asset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 600px; margin: 15px auto; }
+        .chart-container { max-width: 600px; margin: 15px auto; background: #1e2329; border-radius: 12px; padding: 15px; border: 1px solid #2b3139; }
+        #timer { position: fixed; top: 10px; right: 10px; background: #f3ba2f; color: black; padding: 3px 10px; border-radius: 20px; font-size: 0.75em; font-weight: bold; z-index: 100; }
         .ai-box { max-width: 600px; margin: 15px auto; padding: 12px; background: rgba(243, 186, 47, 0.1); border: 1px solid #f3ba2f; border-radius: 8px; font-size: 0.85em; text-align: center; color: #f3ba2f; }
+        .asset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 600px; margin: 15px auto; }
         button { background: #2b3139; color: #848e9c; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
         button.active { background: #f3ba2f; color: black; font-weight: bold; }
     </style></head>
     <body>
         <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.3 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.4 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
@@ -157,7 +150,7 @@ def home():
         </div>
         <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Analizowanie...</span></div>
         <div class="chart-container">
-            <div style="display:flex; justify-content:center; gap:5px; margin-bottom:10px;">
+            <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
                 <button id="b-week" onclick="changeRange('week')">Tydzień</button>
             </div>
@@ -181,12 +174,44 @@ def home():
                 pEl.innerText = (d.state.profit>=0?'+':'') + d.state.profit + ' $';
                 pEl.style.color = d.state.profit>=0?'#0ecb81':'#f6465d';
                 timeLeft = 30;
+                
+                const chartData = {
+                    labels: d.history.map(h => h.t),
+                    datasets: [{
+                        data: d.history.map(h => h.v),
+                        borderColor: '#f3ba2f',
+                        backgroundColor: 'rgba(243, 186, 47, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 3,
+                        pointBackgroundColor: '#f3ba2f',
+                        tension: 0.1,
+                        fill: true
+                    }]
+                };
+
                 if(!chart) {
                     chart = new Chart(document.getElementById('myChart'), {
-                        type:'line', data:{labels:d.history.map(h=>h.t), datasets:[{data:d.history.map(h=>h.v), borderColor:'#f3ba2f', tension:0.4, fill:true, backgroundColor:'rgba(243,186,47,0.1)'}]},
-                        options:{animation:false, plugins:{legend:{display:false}}, scales:{y:{grid:{color:'#2b3139'}}, x:{grid:{display:false}}}}
+                        type: 'line',
+                        data: chartData,
+                        options: {
+                            animation: false,
+                            plugins: { legend: { display: false } },
+                            scales: {
+                                y: { 
+                                    grid: { color: '#2b3139' },
+                                    ticks: { color: '#848e9c', font: { size: 10 } }
+                                },
+                                x: { 
+                                    grid: { display: true, color: '#2b3139' },
+                                    ticks: { color: '#848e9c', font: { size: 10 }, maxRotation: 45 }
+                                }
+                            }
+                        }
                     });
-                } else { chart.data.labels = d.history.map(h=>h.t); chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
+                } else { 
+                    chart.data = chartData;
+                    chart.update(); 
+                }
             }
             setInterval(() => {
                 timeLeft--;
