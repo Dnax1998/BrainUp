@@ -14,7 +14,7 @@ STATS_FILE = 'balance_history.json'
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0       
 TRADE_AMOUNT_USDC = 200.0      
-RSI_BUY_THRESHOLD = 50         
+RSI_BUY_THRESHOLD = 35         
 RSI_SELL_THRESHOLD = 58        
 
 mexc = ccxt.mexc({
@@ -45,6 +45,16 @@ def calculate_rsi(symbol):
         return round(rsi.iloc[-1], 1)
     except: return 50.0
 
+def save_history(val):
+    history = []
+    if os.path.exists(STATS_FILE):
+        with open(STATS_FILE, 'r') as f:
+            try: history = json.load(f)
+            except: history = []
+    history.append({"t": datetime.now().isoformat(), "v": round(val, 2)})
+    with open(STATS_FILE, 'w') as f:
+        json.dump(history[-20000:], f)
+
 def run_loop():
     global display_state
     try:
@@ -62,16 +72,19 @@ def run_loop():
             calculated_total += (total_amt * price)
             rsi_val = calculate_rsi(symbol)
             
-            if total_amt * price < 10.0: 
-                if rsi_val < 35:
-                    qty = round(TRADE_AMOUNT_USDC / price, 6)
-                    if usdc_free >= TRADE_AMOUNT_USDC:
-                        mexc.create_order(pair, 'limit', 'buy', qty, price)
-                        display_state["buy_count"] += 1
-            else: 
-                if rsi_val > RSI_SELL_THRESHOLD:
-                    mexc.create_order(pair, 'limit', 'sell', total_amt, price)
-                    display_state["sell_count"] += 1
+            # --- LOGIKA DCA (Uśrednianie) ---
+            if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
+                qty = round(TRADE_AMOUNT_USDC / price, 6)
+                mexc.create_order(pair, 'limit', 'buy', qty, price)
+                display_state["buy_count"] += 1
+                ai_reports.append(f"🔥 {symbol}: DCA KUPNO (RSI {rsi_val})")
+                usdc_free -= TRADE_AMOUNT_USDC 
+            
+            # --- LOGIKA SPRZEDAŻY CAŁOŚCI ---
+            elif rsi_val > RSI_SELL_THRESHOLD and total_amt * price > 10.0:
+                mexc.create_order(pair, 'limit', 'sell', total_amt, price)
+                display_state["sell_count"] += 1
+                ai_reports.append(f"💰 {symbol}: SPRZEDAŻ (RSI {rsi_val})")
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
@@ -79,17 +92,10 @@ def run_loop():
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": f"BTC RSI: {assets_update['BTC']['rsi']} | ETH RSI: {assets_update['ETH']['rsi']}",
+            "last_action": " | ".join(ai_reports) if ai_reports else f"Skanowanie... (Saldo: {round(usdc_free,1)} $)",
             "assets": assets_update
         })
-        
-        history = []
-        if os.path.exists(STATS_FILE):
-            with open(STATS_FILE, 'r') as f:
-                try: history = json.load(f)
-                except: history = []
-        history.append({"t": datetime.now().isoformat(), "v": round(calculated_total, 2)})
-        with open(STATS_FILE, 'w') as f: json.dump(history[-20000:], f)
+        save_history(calculated_total)
     except Exception as e: 
         display_state["last_action"] = f"Błąd: {str(e)}"
 
@@ -105,7 +111,6 @@ def get_data(range_type):
         except: history = []
     now = datetime.now()
     points = []
-    
     if range_type == 'day':
         for i in range(23, -1, -1):
             target = now - timedelta(hours=i)
@@ -121,14 +126,13 @@ def get_data(range_type):
             target = (now - timedelta(days=i)).replace(hour=12, minute=0)
             match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
             points.append({"t": target.strftime("%d/%m"), "v": match['v']})
-            
     return jsonify({"state": display_state, "history": points})
 
 @app.route('/')
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v10.6 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v10.7 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -147,7 +151,7 @@ def home():
     </style></head>
     <body>
         <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.6 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.7 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
@@ -183,34 +187,21 @@ def home():
                 pEl.innerText = (d.state.profit>=0?'+':'') + d.state.profit + ' $';
                 pEl.style.color = d.state.profit>=0?'#0ecb81':'#f6465d';
                 timeLeft = 30;
-                
                 document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
                 document.getElementById('b-'+currentRange).classList.add('active');
-
                 const chartData = {
                     labels: d.history.map(h => h.t),
                     datasets: [{
                         data: d.history.map(h => h.v),
                         borderColor: '#f3ba2f',
                         backgroundColor: 'rgba(243, 186, 47, 0.1)',
-                        borderWidth: 2,
-                        pointRadius: 3,
-                        pointBackgroundColor: '#f3ba2f',
-                        tension: 0.1,
-                        fill: true
+                        borderWidth: 2, tension: 0.1, fill: true
                     }]
                 };
-
                 if(!chart) {
                     chart = new Chart(document.getElementById('myChart'), {
                         type: 'line', data: chartData,
-                        options: {
-                            animation: false, plugins: { legend: { display: false } },
-                            scales: {
-                                y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } },
-                                x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } }
-                            }
-                        }
+                        options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } }, x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } } } }
                     });
                 } else { chart.data = chartData; chart.update(); }
             }
