@@ -68,9 +68,10 @@ def run_loop():
                     if usdc_free >= TRADE_AMOUNT_USDC:
                         mexc.create_order(pair, 'limit', 'buy', qty, price)
                         display_state["buy_count"] += 1
-                elif rsi_val < RSI_BUY_THRESHOLD:
-                    # Tutaj opcjonalnie AI
-                    pass
+            else: 
+                if rsi_val > RSI_SELL_THRESHOLD:
+                    mexc.create_order(pair, 'limit', 'sell', total_amt, price)
+                    display_state["sell_count"] += 1
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
@@ -116,7 +117,6 @@ def get_data(range_type):
             match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
             points.append({"t": target.strftime("%d/%m"), "v": match['v']})
     elif range_type == 'month':
-        # DODANO OBSŁUGĘ MIESIĄCA
         for i in range(29, -1, -1):
             target = (now - timedelta(days=i)).replace(hour=12, minute=0)
             match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
@@ -128,7 +128,7 @@ def get_data(range_type):
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v10.5 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v10.6 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -137,6 +137,7 @@ def home():
         .card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; }
         .label { color: #848e9c; font-size: 0.75em; text-transform: uppercase; }
         .value { font-size: 1.2em; font-weight: bold; margin-top: 5px; }
+        .sub-label { font-size: 0.72em; color: #f3ba2f; margin-top: 8px; border-top: 1px solid #2b3139; padding-top: 5px; }
         .chart-container { max-width: 600px; margin: 15px auto; background: #1e2329; border-radius: 12px; padding: 15px; border: 1px solid #2b3139; }
         #timer { position: fixed; top: 10px; right: 10px; background: #f3ba2f; color: black; padding: 3px 10px; border-radius: 20px; font-size: 0.75em; font-weight: bold; z-index: 100; }
         .ai-box { max-width: 600px; margin: 15px auto; padding: 12px; background: rgba(243, 186, 47, 0.1); border: 1px solid #f3ba2f; border-radius: 8px; font-size: 0.85em; text-align: center; color: #f3ba2f; }
@@ -146,12 +147,12 @@ def home():
     </style></head>
     <body>
         <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.5 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.6 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
-            <div class="card"><div class="label">Zysk / Strata</div><div id="profit" class="value">--</div></div>
-            <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div></div>
+            <div class="card"><div class="label">Zysk / Strata</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
+            <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
         <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Analizowanie...</span></div>
         <div class="chart-container">
@@ -173,6 +174,8 @@ def home():
                 const res = await fetch('/api/data/'+currentRange); const d = await res.json();
                 document.getElementById('usdc').innerText = d.state.usdc + ' $';
                 document.getElementById('total').innerText = d.state.total + ' $';
+                document.getElementById('b_count').innerText = d.state.buy_count;
+                document.getElementById('s_count').innerText = d.state.sell_count;
                 document.getElementById('ai_action').innerText = d.state.last_action;
                 document.getElementById('btc_amt').innerText = d.state.assets.BTC.amount;
                 document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
@@ -200,21 +203,16 @@ def home():
 
                 if(!chart) {
                     chart = new Chart(document.getElementById('myChart'), {
-                        type: 'line',
-                        data: chartData,
+                        type: 'line', data: chartData,
                         options: {
-                            animation: false,
-                            plugins: { legend: { display: false } },
+                            animation: false, plugins: { legend: { display: false } },
                             scales: {
                                 y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } },
                                 x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } }
                             }
                         }
                     });
-                } else { 
-                    chart.data = chartData;
-                    chart.update(); 
-                }
+                } else { chart.data = chartData; chart.update(); }
             }
             setInterval(() => {
                 timeLeft--;
