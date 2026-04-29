@@ -11,9 +11,9 @@ app = Flask('')
 start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
 
-# --- KONFIGURACJA HANDLU (WERSJA 10.1) ---
-INITIAL_CAPITAL = 1000.0       # Twoja kwota bazowa
-TRADE_AMOUNT_USDC = 250.0      
+# --- KONFIGURACJA ---
+INITIAL_CAPITAL = 1000.0       
+TRADE_AMOUNT_USDC = 120.0      
 RSI_BUY_THRESHOLD = 50         
 RSI_SELL_THRESHOLD = 58        
 
@@ -29,7 +29,7 @@ groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
-    "last_action": "Inicjalizacja Systemu...",
+    "last_action": "Synchronizacja...",
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
@@ -62,7 +62,9 @@ def run_loop():
     try:
         balance = mexc.fetch_balance()
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
-        current_total = usdc_free
+        
+        # LICZNIK STARTUJE OD WOLNYCH DOLARÓW
+        current_total = usdc_free 
         assets_update = {}
         ai_reports = []
 
@@ -70,46 +72,41 @@ def run_loop():
             pair = f"{symbol}/USDC"
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
-            amt = float(balance.get(symbol, {}).get('free', 0.0))
+            
+            # POPRAWKA: Pobieramy 'total' (wolne + zablokowane w zleceniach)
+            amt = float(balance.get(symbol, {}).get('total', 0.0))
+            
+            # DODAJEMY WARTOŚĆ MONETY DO SALDA CAŁKOWITEGO
             current_total += (amt * price)
+            
             rsi_val = calculate_rsi(symbol)
             
-            # --- LOGIKA HANDLU HYBRYDOWEGO (PLATINUM + GUARDIAN) ---
+            # HANDEL LIMIT (Naprawa błędu 30041)
             if amt * price < 10.0: 
-                if rsi_val < 35: # Tryb Guardian: Kupuj agresywnie
+                if rsi_val < 35:
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
                     if usdc_free >= TRADE_AMOUNT_USDC:
                         mexc.create_order(pair, 'limit', 'buy', qty, price)
                         display_state["buy_count"] += 1
-                        ai_reports.append(f"🛡️ {symbol}: KUPNO GUARDIAN (RSI {rsi_val})")
-                elif rsi_val < RSI_BUY_THRESHOLD: # Tryb AI: Kupuj ostrożnie
-                    if ask_ai_decision(symbol, price, rsi_val):
-                        qty = round(TRADE_AMOUNT_USDC / price, 6)
-                        if usdc_free >= TRADE_AMOUNT_USDC:
-                            mexc.create_order(pair, 'limit', 'buy', qty, price)
-                            display_state["buy_count"] += 1
-                            ai_reports.append(f"🚀 {symbol}: KUPNO AI (RSI {rsi_val})")
-                    else:
-                        ai_reports.append(f"⚖️ {symbol}: AI czeka (RSI {rsi_val})")
-                else:
-                    ai_reports.append(f"🔍 {symbol}: RSI {rsi_val}")
+                        ai_reports.append(f"🛡️ {symbol}: KUPNO (RSI {rsi_val})")
             else: 
                 if rsi_val > RSI_SELL_THRESHOLD:
                     mexc.create_order(pair, 'limit', 'sell', amt, price)
                     display_state["sell_count"] += 1
-                    ai_reports.append(f"💰 {symbol}: SPRZEDANO (RSI {rsi_val})")
-                else:
-                    ai_reports.append(f"📈 {symbol}: HOLD (RSI {rsi_val})")
+                    ai_reports.append(f"💰 {symbol}: SPRZEDAŻ (RSI {rsi_val})")
 
             assets_update[symbol] = {"amount": round(amt, 6), "rsi": rsi_val}
 
+        # FINALNA AKTUALIZACJA INTERFEJSU
         display_state.update({
-            "usdc": round(usdc_free, 2), "total": round(current_total, 2), 
+            "usdc": round(usdc_free, 2),
+            "total": round(current_total, 2),
             "profit": round(current_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports),
+            "last_action": " | ".join(ai_reports) if ai_reports else "Rynek stabilny",
             "assets": assets_update
         })
         
+        # ZAPIS DO WYKRESU
         history = []
         if os.path.exists(STATS_FILE):
             with open(STATS_FILE, 'r') as f:
@@ -117,6 +114,7 @@ def run_loop():
                 except: history = []
         history.append({"t": datetime.now().isoformat(), "v": round(current_total, 2)})
         with open(STATS_FILE, 'w') as f: json.dump(history[-20000:], f)
+
     except Exception as e: 
         display_state["last_action"] = f"Błąd: {str(e)}"
 
@@ -133,7 +131,6 @@ def get_data(range_type):
     if not history: return jsonify({"state": display_state, "history": []})
     now = datetime.now()
     points = []
-    
     if range_type == 'day':
         for i in range(23, -1, -1):
             target = now - timedelta(hours=i)
@@ -149,14 +146,13 @@ def get_data(range_type):
             target = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0)
             match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
             points.append({"t": target.strftime("%d/%m"), "v": match['v']})
-            
     return jsonify({"state": display_state, "history": points})
 
 @app.route('/')
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v10.1 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v10.2 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -172,18 +168,16 @@ def home():
         button { background: #2b3139; color: #848e9c; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
         button.active { background: #f3ba2f; color: black; font-weight: bold; }
         .asset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 600px; margin: 15px auto; }
-        #timer { position: fixed; top: 10px; right: 10px; background: #f3ba2f; color: black; padding: 2px 8px; border-radius: 20px; font-size: 0.7em; font-weight: bold; }
     </style></head>
     <body>
-        <div id="timer">Aktualizacja: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.1 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.2 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
             <div class="card"><div class="label">Zysk / Strata</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
             <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
-        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Skanowanie rynku...</span></div>
+        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Skanowanie...</span></div>
         <div class="chart-container">
             <div class="btn-group">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
