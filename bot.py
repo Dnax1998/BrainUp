@@ -29,9 +29,22 @@ groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 display_state = {
     "usdc": 0.0, "total": 1000.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
-    "last_action": "Synchronizacja...",
+    "last_action": "Inicjalizacja AI...",
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
+
+def ask_ai_decision(symbol, price, rsi):
+    try:
+        prompt = f"Analiza techniczna {symbol}: Cena {price}, RSI {rsi}. Czy to bezpieczny moment na zakup w strategii DCA? Odpowiedz tylko jednym słowem: TAK lub NIE."
+        completion = groq_client.chat.completions.create(
+            model="llama3-8b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=5
+        )
+        answer = completion.choices[0].message.content.strip().upper()
+        return "TAK" in answer
+    except:
+        return True # Fail-safe: jeśli AI nie odpowie, handluj technicznie
 
 def calculate_rsi(symbol):
     try:
@@ -72,15 +85,18 @@ def run_loop():
             calculated_total += (total_amt * price)
             rsi_val = calculate_rsi(symbol)
             
-            # --- LOGIKA DCA (Uśrednianie) ---
+            # --- LOGIKA KUPNA (DCA + POTWIERDZENIE AI) ---
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
-                qty = round(TRADE_AMOUNT_USDC / price, 6)
-                mexc.create_order(pair, 'limit', 'buy', qty, price)
-                display_state["buy_count"] += 1
-                ai_reports.append(f"🔥 {symbol}: DCA KUPNO (RSI {rsi_val})")
-                usdc_free -= TRADE_AMOUNT_USDC 
+                if ask_ai_decision(symbol, price, rsi_val):
+                    qty = round(TRADE_AMOUNT_USDC / price, 6)
+                    mexc.create_order(pair, 'limit', 'buy', qty, price)
+                    display_state["buy_count"] += 1
+                    ai_reports.append(f"🤖 AI + 🔥 {symbol}: KUPNO (RSI {rsi_val})")
+                    usdc_free -= TRADE_AMOUNT_USDC
+                else:
+                    ai_reports.append(f"🧊 AI CZEKA: {symbol} (RSI {rsi_val})")
             
-            # --- LOGIKA SPRZEDAŻY CAŁOŚCI ---
+            # --- LOGIKA SPRZEDAŻY ---
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt * price > 10.0:
                 mexc.create_order(pair, 'limit', 'sell', total_amt, price)
                 display_state["sell_count"] += 1
@@ -92,7 +108,7 @@ def run_loop():
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"Skanowanie... (Saldo: {round(usdc_free,1)} $)",
+            "last_action": " | ".join(ai_reports) if ai_reports else f"Skanowanie... (Sal.: {round(usdc_free,1)}$)",
             "assets": assets_update
         })
         save_history(calculated_total)
@@ -132,7 +148,7 @@ def get_data(range_type):
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v10.7 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v10.8 AI</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -151,14 +167,14 @@ def home():
     </style></head>
     <body>
         <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.7 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.8 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
             <div class="card"><div class="label">Zysk / Strata</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
             <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
-        <div class="ai-box"><b>Llama 3 Analytics:</b><br><span id="ai_action">Analizowanie...</span></div>
+        <div class="ai-box"><b>Llama 3 Active Decision:</b><br><span id="ai_action">Inicjalizacja systemu...</span></div>
         <div class="chart-container">
             <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
