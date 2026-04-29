@@ -68,12 +68,9 @@ def run_loop():
                     if usdc_free >= TRADE_AMOUNT_USDC:
                         mexc.create_order(pair, 'limit', 'buy', qty, price)
                         display_state["buy_count"] += 1
-                        ai_reports.append(f"🛡️ {symbol}: KUPNO (RSI {rsi_val})")
-            else: 
-                if rsi_val > RSI_SELL_THRESHOLD:
-                    mexc.create_order(pair, 'limit', 'sell', total_amt, price)
-                    display_state["sell_count"] += 1
-                    ai_reports.append(f"💰 {symbol}: SPRZEDAŻ (RSI {rsi_val})")
+                elif rsi_val < RSI_BUY_THRESHOLD:
+                    # Tutaj opcjonalnie AI
+                    pass
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
@@ -81,7 +78,7 @@ def run_loop():
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else "Rynek stabilny",
+            "last_action": f"BTC RSI: {assets_update['BTC']['rsi']} | ETH RSI: {assets_update['ETH']['rsi']}",
             "assets": assets_update
         })
         
@@ -107,6 +104,7 @@ def get_data(range_type):
         except: history = []
     now = datetime.now()
     points = []
+    
     if range_type == 'day':
         for i in range(23, -1, -1):
             target = now - timedelta(hours=i)
@@ -116,14 +114,21 @@ def get_data(range_type):
         for i in range(13, -1, -1):
             target = now - timedelta(hours=i*12)
             match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
-            points.append({"t": target.strftime("%d/%m %Hh"), "v": match['v']})
+            points.append({"t": target.strftime("%d/%m"), "v": match['v']})
+    elif range_type == 'month':
+        # DODANO OBSŁUGĘ MIESIĄCA
+        for i in range(29, -1, -1):
+            target = (now - timedelta(days=i)).replace(hour=12, minute=0)
+            match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
+            points.append({"t": target.strftime("%d/%m"), "v": match['v']})
+            
     return jsonify({"state": display_state, "history": points})
 
 @app.route('/')
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v10.4 Platinum</title>
+    <!DOCTYPE html><html><head><title>BrainUp v10.5 Platinum</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -141,7 +146,7 @@ def home():
     </style></head>
     <body>
         <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.4 PLATINUM</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v10.5 PLATINUM</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
@@ -153,6 +158,7 @@ def home():
             <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
                 <button id="b-week" onclick="changeRange('week')">Tydzień</button>
+                <button id="b-month" onclick="changeRange('month')">Miesiąc</button>
             </div>
             <canvas id="myChart"></canvas>
         </div>
@@ -175,6 +181,9 @@ def home():
                 pEl.style.color = d.state.profit>=0?'#0ecb81':'#f6465d';
                 timeLeft = 30;
                 
+                document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+                document.getElementById('b-'+currentRange).classList.add('active');
+
                 const chartData = {
                     labels: d.history.map(h => h.t),
                     datasets: [{
@@ -197,14 +206,8 @@ def home():
                             animation: false,
                             plugins: { legend: { display: false } },
                             scales: {
-                                y: { 
-                                    grid: { color: '#2b3139' },
-                                    ticks: { color: '#848e9c', font: { size: 10 } }
-                                },
-                                x: { 
-                                    grid: { display: true, color: '#2b3139' },
-                                    ticks: { color: '#848e9c', font: { size: 10 }, maxRotation: 45 }
-                                }
+                                y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } },
+                                x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } }
                             }
                         }
                     });
