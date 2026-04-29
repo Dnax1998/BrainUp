@@ -13,7 +13,7 @@ STATS_FILE = 'balance_history.json'
 
 # --- KONFIGURACJA HANDLU (WERSJA 10.1) ---
 INITIAL_CAPITAL = 1000.0       # Twoja kwota bazowa
-TRADE_AMOUNT_USDC = 120.0      
+TRADE_AMOUNT_USDC = 250.0      
 RSI_BUY_THRESHOLD = 50         
 RSI_SELL_THRESHOLD = 58        
 
