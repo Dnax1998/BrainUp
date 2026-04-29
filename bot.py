@@ -44,7 +44,7 @@ def ask_ai_decision(symbol, price, rsi):
         answer = completion.choices[0].message.content.strip().upper()
         return "TAK" in answer
     except:
-        return True # Fail-safe: jeśli AI nie odpowie, handluj technicznie
+        return True 
 
 def calculate_rsi(symbol):
     try:
@@ -71,6 +71,7 @@ def save_history(val):
 def run_loop():
     global display_state
     try:
+        current_time = datetime.now().strftime("%H:%M") # --- DODANA GODZINA ---
         balance = mexc.fetch_balance()
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
         calculated_total = usdc_free 
@@ -85,7 +86,6 @@ def run_loop():
             calculated_total += (total_amt * price)
             rsi_val = calculate_rsi(symbol)
             
-            # --- LOGIKA KUPNA (DCA + POTWIERDZENIE AI) ---
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
                 if ask_ai_decision(symbol, price, rsi_val):
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
@@ -96,7 +96,6 @@ def run_loop():
                 else:
                     ai_reports.append(f"🧊 AI CZEKA: {symbol} (RSI {rsi_val})")
             
-            # --- LOGIKA SPRZEDAŻY ---
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt * price > 10.0:
                 mexc.create_order(pair, 'limit', 'sell', total_amt, price)
                 display_state["sell_count"] += 1
@@ -108,7 +107,8 @@ def run_loop():
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"Skanowanie... (Sal.: {round(usdc_free,1)}$)",
+            # --- STATUS Z GODZINĄ ---
+            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie... (Sal.: {round(usdc_free,1)}$)",
             "assets": assets_update
         })
         save_history(calculated_total)
@@ -179,7 +179,7 @@ def home():
             <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
                 <button id="b-week" onclick="changeRange('week')">Tydzień</button>
-                <button id="b-month" onclick="changeRange('month')">Miesiąc</button>
+                <button id="b-month" onclick="changeRange('month')")>Miesiąc</button>
             </div>
             <canvas id="myChart"></canvas>
         </div>
