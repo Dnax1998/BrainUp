@@ -10,7 +10,7 @@ from groq import Groq
 app = Flask('')
 start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
-STATE_FILE = 'bot_state.json'
+STATE_FILE = 'bot_state.json' 
 
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0       
@@ -21,7 +21,7 @@ RSI_SELL_THRESHOLD = 58
 mexc = ccxt.mexc({'apiKey': os.getenv('MEXC_API_KEY'), 'secret': os.getenv('MEXC_SECRET_KEY'), 'options': {'defaultType': 'spot'}, 'enableRateLimit': True})
 groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 
-# --- ŁADOWANIE STANU (Persistence) ---
+# --- ZARZĄDZANIE STANEM (Persistence) ---
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
@@ -32,7 +32,7 @@ def load_state():
         "display_state": {
             "usdc": 0.0, "total": 1000.0, "profit": 0.0,
             "buy_count": 0, "sell_count": 0, "last_action": "Inicjalizacja...",
-            "assets": {"BTC": {"amount":0}, "ETH": {"amount":0}}
+            "assets": {"BTC": 0.0, "ETH": 0.0}
         }
     }
 
@@ -47,7 +47,7 @@ def save_state():
 # --- LOGIKA BOTA ---
 def ask_ai_decision(symbol, price, rsi):
     try:
-        prompt = f"Analiza {symbol}: Cena {price}, RSI {rsi}. Czy kupować (DCA)? Odpowiedz jednym słowem: TAK lub NIE."
+        prompt = f"Analiza {symbol}: Cena {price}, RSI {rsi}. Czy kupować? TAK/NIE."
         completion = groq_client.chat.completions.create(model="llama3-8b-8192", messages=[{"role": "user", "content": prompt}], max_tokens=5)
         return "TAK" in completion.choices[0].message.content.strip().upper()
     except: return True 
@@ -90,10 +90,7 @@ def run_loop():
 
         calculated_total = usdc_free + (btc_amt * price_btc) + (eth_amt * price_eth)
         
-        # Logika kupna/sprzedaży
-        assets_info = {"BTC": {"amount": round(btc_amt, 6)}, "ETH": {"amount": round(eth_amt, 6)}}
         ai_reports = []
-        
         for symbol, amt, price in [("BTC", btc_amt, price_btc), ("ETH", eth_amt, price_eth)]:
             rsi_val = calculate_rsi(symbol)
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
@@ -105,7 +102,6 @@ def run_loop():
                         usdc_free -= TRADE_AMOUNT_USDC
                         ai_reports.append(f"🤖 KUPNO {symbol}")
                     except: pass
-            
             elif rsi_val > RSI_SELL_THRESHOLD and amt > 0:
                 if price > avg_buy_prices.get(symbol, 0):
                     try:
@@ -118,30 +114,30 @@ def run_loop():
         display_state.update({
             "usdc": round(usdc_free, 2), "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"Skanowanie ({datetime.now().strftime('%H:%M')})",
-            "assets": assets_info
+            "last_action": " | ".join(ai_reports) if ai_reports else f"[{datetime.now().strftime('%H:%M')}] Skanowanie OK",
+            "assets": {"BTC": round(btc_amt, 6), "ETH": round(eth_amt, 6)}
         })
         save_history(calculated_total)
         save_state()
-    except Exception as e: print(f"Błąd pętli: {e}")
+    except Exception as e: print(e)
 
-# --- WEB UI & ROUTES ---
 scheduler = BackgroundScheduler()
 scheduler.add_job(run_loop, 'interval', minutes=1)
 scheduler.start()
 
+# --- WEB UI ---
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
     if not os.path.exists(STATS_FILE): return jsonify({"state": display_state, "history": []})
     with open(STATS_FILE, 'r') as f:
         try: history = json.load(f)
         except: history = []
-    # Generowanie punktów dla wykresu
+    
     now = datetime.now()
     points = []
-    # Logika zakresów
-    lookback = 24 if range_type == 'day' else (168 if range_type == 'week' else 720)
-    for i in range(lookback, 0, -int(lookback/24)):
+    # Logika dopasowania zakresów
+    limit = 24 if range_type == 'day' else (168 if range_type == 'week' else 720)
+    for i in range(limit, 0, -int(limit/24)):
         target = now - timedelta(hours=i)
         match = min(history, key=lambda x: abs((datetime.fromisoformat(x['t']) - target).total_seconds()))
         points.append({"t": target.strftime("%H:%M" if range_type == 'day' else "%d/%m"), "v": match['v']})
@@ -149,53 +145,63 @@ def get_data(range_type):
 
 @app.route('/')
 def home():
+    uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>AI TRADER FULL</title>
+    <!DOCTYPE html><html><head><title>AI TRADER v11.0 SAFE</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body { background: #0b0e11; color: white; font-family: sans-serif; padding: 10px; }
+        body { background: #0b0e11; color: white; font-family: sans-serif; padding: 10px; margin: 0; }
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-        .card { background: #1e2329; padding: 12px; border-radius: 8px; text-align: center; }
-        .label { color: #848e9c; font-size: 0.7em; }
-        .value { font-size: 1.1em; font-weight: bold; }
-        .ai-box { margin-top: 10px; padding: 10px; background: #2b3139; border-radius: 8px; color: #f3ba2f; font-size: 0.9em; }
+        .card { background: #1e2329; padding: 12px; border-radius: 12px; text-align: center; border: 1px solid #2b3139; }
+        .label { color: #848e9c; font-size: 0.7em; text-transform: uppercase; }
+        .value { font-size: 1.1em; font-weight: bold; margin-top: 5px; }
+        .decision-box { background: #1e2329; padding: 10px; border-radius: 8px; border: 1px solid #f3ba2f; color: #f3ba2f; margin: 10px 0; text-align: center; font-size: 0.9em; }
+        .chart-box { background: #1e2329; padding: 10px; border-radius: 12px; margin: 10px 0; }
+        button { background: #2b3139; color: white; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+        button.active { background: #f3ba2f; color: black; font-weight: bold; }
     </style></head>
     <body>
-        <h3 style="text-align:center;">🧠 AI TRADER FULL</h3>
+        <h3 style="text-align:center;">🧠 AI TRADER v11.0 SAFE</h3>
         <div class="grid">
-            <div class="card"><div class="label">USDC</div><div class="value" id="usdc">--</div></div>
-            <div class="card"><div class="label">Portfel</div><div class="value" id="total">--</div></div>
-            <div class="card"><div class="label">ZYSK (REALNY)</div><div class="value" id="profit">--</div></div>
-            <div class="card"><div class="label">Statystyki</div><div class="value" id="stats">K:0 | S:0</div></div>
+            <div class="card"><div class="label">USDC WOLNE</div><div class="value" id="usdc">--</div></div>
+            <div class="card"><div class="label">UPTIME</div><div class="value">"""+uptime+"""</div></div>
+            <div class="card"><div class="label">ZYSK (REALNY)</div><div class="value" id="profit" style="color:#f6465d">--</div><div id="sell_cnt" style="font-size:0.7em; color:#848e9c">Sprzedaże: 0</div></div>
+            <div class="card"><div class="label">WARTOŚĆ PORTFELA</div><div class="value" id="total">--</div><div id="buy_cnt" style="font-size:0.7em; color:#848e9c">Kupna: 0</div></div>
         </div>
-        <div class="ai-box" id="ai_action">Skanowanie...</div>
-        <div class="card" style="margin-top:10px;">
-            <div style="margin-bottom:10px;">
-                <button onclick="updateData('day')">Dzień</button> <button onclick="updateData('week')">Tydzień</button> <button onclick="updateData('month')">Miesiąc</button>
+        <div class="decision-box" id="ai_action">Inicjalizacja...</div>
+        <div class="chart-box">
+            <div style="text-align:center; margin-bottom:10px;">
+                <button id="btn-day" class="active" onclick="fetchData('day')">Dzień</button>
+                <button id="btn-week" onclick="fetchData('week')">Tydzień</button>
+                <button id="btn-month" onclick="fetchData('month')">Miesiąc</button>
             </div>
             <canvas id="myChart"></canvas>
         </div>
-        <div class="grid" style="margin-top:10px;">
-            <div class="card">BTC: <span id="btc_amt">0</span></div>
-            <div class="card">ETH: <span id="eth_amt">0</span></div>
+        <div class="grid">
+            <div class="card"><div class="label">BTC</div><div class="value" id="btc">0</div></div>
+            <div class="card"><div class="label">ETH</div><div class="value" id="eth">0</div></div>
         </div>
         <script>
             let chart;
-            async function updateData(range='day') {
+            async function fetchData(range) {
+                document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+                document.getElementById('btn-'+range).classList.add('active');
                 const res = await fetch('/api/data/'+range); const d = await res.json();
                 document.getElementById('usdc').innerText = d.state.usdc + ' $';
                 document.getElementById('total').innerText = d.state.total + ' $';
                 document.getElementById('ai_action').innerText = d.state.last_action;
-                document.getElementById('stats').innerText = 'K: ' + d.state.buy_count + ' | S: ' + d.state.sell_count;
-                document.getElementById('btc_amt').innerText = d.state.assets.BTC.amount;
-                document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
+                document.getElementById('sell_cnt').innerText = 'Sprzedaże: ' + d.state.sell_count;
+                document.getElementById('buy_cnt').innerText = 'Kupna: ' + d.state.buy_count;
+                document.getElementById('btc').innerText = d.state.assets.BTC;
+                document.getElementById('eth').innerText = d.state.assets.ETH;
+                const p = d.state.profit;
                 const pEl = document.getElementById('profit');
-                pEl.innerText = d.state.profit + ' $';
-                pEl.style.color = d.state.profit >= 0 ? '#0ecb81' : '#f6465d';
+                pEl.innerText = (p>=0?'+':'') + p + ' $';
+                pEl.style.color = p>=0?'#0ecb81':'#f6465d';
                 if(!chart) { chart = new Chart(document.getElementById('myChart'), { type: 'line', data: { labels: d.history.map(h=>h.t), datasets: [{ data: d.history.map(h=>h.v), borderColor: '#f3ba2f' }] } }); }
                 else { chart.data.labels = d.history.map(h=>h.t); chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
             }
-            setInterval(updateData, 30000); updateData();
+            setInterval(() => fetchData('day'), 30000); fetchData('day');
         </script>
     </body></html>
     """)
