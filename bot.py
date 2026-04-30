@@ -76,18 +76,33 @@ def run_loop():
     try:
         current_time = datetime.now().strftime("%H:%M")
         balance = mexc.fetch_balance()
+        
+        # ZABEZPIECZENIE: Sprawdzamy czy API zwróciło poprawne dane
+        if not balance or 'USDC' not in balance:
+            raise Exception("Błąd API: Brak danych o saldzie!")
+
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
-        calculated_total = usdc_free 
-        assets_update = {}
+        
+        # Pobieramy ceny i salda
+        ticker_btc = mexc.fetch_ticker("BTC/USDC")
+        ticker_eth = mexc.fetch_ticker("ETH/USDC")
+        price_btc = float(ticker_btc['last'])
+        price_eth = float(ticker_eth['last'])
+        
+        btc_amt = float(balance.get('BTC', {}).get('total', 0.0))
+        eth_amt = float(balance.get('ETH', {}).get('total', 0.0))
+        
+        calculated_total = usdc_free + (btc_amt * price_btc) + (eth_amt * price_eth)
+        
+        assets_update = {
+            "BTC": {"amount": round(btc_amt, 6), "rsi": calculate_rsi("BTC")},
+            "ETH": {"amount": round(eth_amt, 6), "rsi": calculate_rsi("ETH")}
+        }
         ai_reports = []
 
-        for symbol in ["BTC", "ETH"]:
+        for symbol, amt, price in [("BTC", btc_amt, price_btc), ("ETH", eth_amt, price_eth)]:
             pair = f"{symbol}/USDC"
-            ticker = mexc.fetch_ticker(pair)
-            price = float(ticker['last'])
-            total_amt = float(balance.get(symbol, {}).get('total', 0.0))
-            calculated_total += (total_amt * price)
-            rsi_val = calculate_rsi(symbol)
+            rsi_val = assets_update[symbol]["rsi"]
             
             # KUPNO
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
@@ -96,9 +111,9 @@ def run_loop():
                     mexc.create_order(pair, 'limit', 'buy', qty, price)
                     
                     # Aktualizacja średniej ceny zakupu (DCA)
-                    current_val = total_amt * avg_buy_prices[symbol]
+                    current_val = amt * avg_buy_prices[symbol]
                     new_val = qty * price
-                    avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + qty)
+                    avg_buy_prices[symbol] = (current_val + new_val) / (amt + qty)
                     
                     display_state["buy_count"] += 1
                     ai_reports.append(f"🤖 AI + 🔥 {symbol}: KUPNO (RSI {rsi_val})")
@@ -107,27 +122,25 @@ def run_loop():
                     ai_reports.append(f"🧊 AI CZEKA: {symbol} (RSI {rsi_val})")
             
             # SPRZEDAŻ - TYLKO Z ZYSKIEM
-            elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
+            elif rsi_val > RSI_SELL_THRESHOLD and amt > 0:
                 if price > avg_buy_prices[symbol]:
-                    mexc.create_order(pair, 'limit', 'sell', total_amt, price)
+                    mexc.create_order(pair, 'limit', 'sell', amt, price)
                     display_state["sell_count"] += 1
                     ai_reports.append(f"💰 {symbol}: SPRZEDAŻ Z ZYSKIEM (RSI {rsi_val})")
                     avg_buy_prices[symbol] = 0.0 # Reset po sprzedaży
                 else:
                     ai_reports.append(f"⏳ {symbol}: Czekam na zysk (Cena: {price} < Zakup: {round(avg_buy_prices[symbol],2)})")
 
-            assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
-
         display_state.update({
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie... (Sal.: {round(usdc_free,1)}$)",
+            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie OK",
             "assets": assets_update
         })
         save_history(calculated_total)
     except Exception as e: 
-        display_state["last_action"] = f"Błąd: {str(e)}"
+        display_state["last_action"] = f"⚠️ Oczekiwanie na połączenie: {str(e)}"
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(run_loop, 'interval', minutes=1)
