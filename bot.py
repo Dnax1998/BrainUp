@@ -10,6 +10,7 @@ from groq import Groq
 app = Flask('')
 start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
+STATE_FILE = 'bot_state.json' 
 
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0       
@@ -26,16 +27,30 @@ mexc = ccxt.mexc({
 
 groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 
-display_state = {
-    "usdc": 0.0, "total": 1000.0, "profit": 0.0,
-    "buy_count": 0, "sell_count": 0,
-    "last_action": "Inicjalizacja AI...",
-    "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
-}
+# --- ZARZĄDZANIE STANEM (Persistence) ---
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f: return json.load(f)
+        except: pass
+    return {
+        "avg_buy_prices": {"BTC": 0.0, "ETH": 0.0},
+        "display_state": {
+            "usdc": 0.0, "total": 1000.0, "profit": 0.0,
+            "buy_count": 0, "sell_count": 0, "last_action": "Inicjalizacja...",
+            "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
+        }
+    }
 
-# --- ŚLEDZENIE CENY ZAKUPU ---
-avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
+data = load_state()
+avg_buy_prices = data["avg_buy_prices"]
+display_state = data["display_state"]
 
+def save_state():
+    with open(STATE_FILE, 'w') as f:
+        json.dump({"avg_buy_prices": avg_buy_prices, "display_state": display_state}, f)
+
+# --- LOGIKA BOTA ---
 def ask_ai_decision(symbol, price, rsi):
     try:
         prompt = f"Analiza techniczna {symbol}: Cena {price}, RSI {rsi}. Czy to bezpieczny moment na zakup w strategii DCA? Odpowiedz tylko jednym słowem: TAK lub NIE."
@@ -44,15 +59,12 @@ def ask_ai_decision(symbol, price, rsi):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=5
         )
-        answer = completion.choices[0].message.content.strip().upper()
-        return "TAK" in answer
-    except:
-        return True 
+        return "TAK" in completion.choices[0].message.content.strip().upper()
+    except: return True 
 
 def calculate_rsi(symbol):
     try:
-        pair = f"{symbol}/USDC"
-        bars = mexc.fetch_ohlcv(pair, timeframe='1m', limit=50)
+        bars = mexc.fetch_ohlcv(f"{symbol}/USDC", timeframe='1m', limit=50)
         df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -74,24 +86,18 @@ def save_history(val):
 def run_loop():
     global display_state, avg_buy_prices
     try:
-        current_time = datetime.now().strftime("%H:%M")
         balance = mexc.fetch_balance()
-        
-        # --- ZABEZPIECZENIE: Sprawdzamy czy API zwróciło poprawne dane ---
-        if not balance or 'USDC' not in balance:
-            raise Exception("Błąd API: Brak danych o saldzie!")
+        if not balance or 'USDC' not in balance: return 
 
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
-        
-        # Pobieramy realne saldo BTC i ETH
         btc_amt = float(balance.get('BTC', {}).get('total', 0.0))
         eth_amt = float(balance.get('ETH', {}).get('total', 0.0))
         
-        ticker_btc = mexc.fetch_ticker("BTC/USDC")
-        ticker_eth = mexc.fetch_ticker("ETH/USDC")
-        price_btc = float(ticker_btc['last'])
-        price_eth = float(ticker_eth['last'])
-        
+        try:
+            price_btc = float(mexc.fetch_ticker("BTC/USDC")['last'])
+            price_eth = float(mexc.fetch_ticker("ETH/USDC")['last'])
+        except: return
+
         calculated_total = usdc_free + (btc_amt * price_btc) + (eth_amt * price_eth)
         
         ai_reports = []
@@ -100,47 +106,42 @@ def run_loop():
             "ETH": {"amount": round(eth_amt, 6), "rsi": calculate_rsi("ETH")}
         }
 
-        # --- LOGIKA TRADINGOWA ---
         for symbol, amt, price in [("BTC", btc_amt, price_btc), ("ETH", eth_amt, price_eth)]:
-            pair = f"{symbol}/USDC"
             rsi_val = assets_update[symbol]["rsi"]
-            
-            # KUPNO
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
                 if ask_ai_decision(symbol, price, rsi_val):
-                    qty = round(TRADE_AMOUNT_USDC / price, 6)
-                    mexc.create_order(pair, 'limit', 'buy', qty, price)
-                    
-                    old_val = amt * avg_buy_prices[symbol]
-                    new_val = qty * price
-                    avg_buy_prices[symbol] = (old_val + new_val) / (amt + qty)
-                    
-                    display_state["buy_count"] += 1
-                    ai_reports.append(f"🤖 KUPNO {symbol}")
-                    usdc_free -= TRADE_AMOUNT_USDC
+                    try:
+                        mexc.create_order(f"{symbol}/USDC", 'limit', 'buy', round(TRADE_AMOUNT_USDC/price, 6), price)
+                        avg_buy_prices[symbol] = price
+                        display_state["buy_count"] += 1
+                        usdc_free -= TRADE_AMOUNT_USDC
+                        ai_reports.append(f"🤖 KUPNO {symbol}")
+                    except Exception as e: ai_reports.append(f"Err Buy {symbol}")
             
-            # SPRZEDAŻ (Z BLOKADĄ STRATY)
             elif rsi_val > RSI_SELL_THRESHOLD and amt > 0:
-                if price > avg_buy_prices[symbol]:
-                    mexc.create_order(pair, 'limit', 'sell', amt, price)
-                    display_state["sell_count"] += 1
-                    ai_reports.append(f"💰 SPRZEDAŻ {symbol} (Zysk!)")
-                    avg_buy_prices[symbol] = 0.0
+                if price > avg_buy_prices.get(symbol, 0):
+                    try:
+                        mexc.create_order(f"{symbol}/USDC", 'limit', 'sell', amt, price)
+                        display_state["sell_count"] += 1
+                        avg_buy_prices[symbol] = 0.0
+                        ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
+                    except Exception as e: ai_reports.append(f"Err Sell {symbol}")
                 else:
                     ai_reports.append(f"⏳ Czekam na zysk {symbol}")
 
         display_state.update({
-            "usdc": round(usdc_free, 2),
-            "total": round(calculated_total, 2),
+            "usdc": round(usdc_free, 2), "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie OK",
+            "last_action": " | ".join(ai_reports) if ai_reports else f"[{datetime.now().strftime('%H:%M')}] Skanowanie OK",
             "assets": assets_update
         })
         save_history(calculated_total)
+        save_state()
         
     except Exception as e: 
-        display_state["last_action"] = f"⚠️ Oczekiwanie na połączenie: {str(e)}"
+        print(f"Błąd pętli: {e}")
 
+# --- WEB UI & ROUTES ---
 scheduler = BackgroundScheduler()
 scheduler.add_job(run_loop, 'interval', minutes=1)
 scheduler.start()
@@ -174,7 +175,7 @@ def get_data(range_type):
 def home():
     uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v11.0 Safe</title>
+    <!DOCTYPE html><html><head><title>AI TRADER FULL</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -183,79 +184,38 @@ def home():
         .card { background: #1e2329; padding: 15px; border-radius: 12px; border: 1px solid #2b3139; text-align: center; }
         .label { color: #848e9c; font-size: 0.75em; text-transform: uppercase; }
         .value { font-size: 1.2em; font-weight: bold; margin-top: 5px; }
-        .sub-label { font-size: 0.72em; color: #f3ba2f; margin-top: 8px; border-top: 1px solid #2b3139; padding-top: 5px; }
         .chart-container { max-width: 600px; margin: 15px auto; background: #1e2329; border-radius: 12px; padding: 15px; border: 1px solid #2b3139; }
-        #timer { position: fixed; top: 10px; right: 10px; background: #f3ba2f; color: black; padding: 3px 10px; border-radius: 20px; font-size: 0.75em; font-weight: bold; z-index: 100; }
+        #timer { position: fixed; top: 10px; right: 10px; background: #f3ba2f; color: black; padding: 3px 10px; border-radius: 20px; font-size: 0.75em; font-weight: bold; }
         .ai-box { max-width: 600px; margin: 15px auto; padding: 12px; background: rgba(243, 186, 47, 0.1); border: 1px solid #f3ba2f; border-radius: 8px; font-size: 0.85em; text-align: center; color: #f3ba2f; }
-        .asset-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; max-width: 600px; margin: 15px auto; }
-        button { background: #2b3139; color: #848e9c; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
-        button.active { background: #f3ba2f; color: black; font-weight: bold; }
     </style></head>
     <body>
-        <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v11.0 SAFE</h3>
+        <div id="timer">30s</div>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER FULL</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
-            <div class="card"><div class="label">Zysk (Realny)</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
-            <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
+            <div class="card"><div class="label">Zysk (Realny)</div><div id="profit" class="value">--</div></div>
+            <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div></div>
         </div>
-        <div class="ai-box"><b>Llama 3 Active Decision:</b><br><span id="ai_action">Skanowanie...</span></div>
-        <div class="chart-container">
-            <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
-                <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
-                <button id="b-week" onclick="changeRange('week')">Tydzień</button>
-                <button id="b-month" onclick="changeRange('month')")>Miesiąc</button>
-            </div>
-            <canvas id="myChart"></canvas>
-        </div>
-        <div class="asset-grid">
-            <div class="card"><div style="color:#f3ba2f;">BTC</div><div id="btc_amt" class="value">--</div></div>
-            <div class="card"><div style="color:#f3ba2f;">ETH</div><div id="eth_amt" class="value">--</div></div>
-        </div>
+        <div class="ai-box" id="ai_action">Skanowanie...</div>
+        <div class="chart-container"><canvas id="myChart"></canvas></div>
         <script>
-            let chart; let currentRange = 'day'; let timeLeft = 30;
-            function changeRange(r) { currentRange = r; update(); }
+            let chart;
             async function update() {
-                const res = await fetch('/api/data/'+currentRange); const d = await res.json();
+                const res = await fetch('/api/data/day'); const d = await res.json();
                 document.getElementById('usdc').innerText = d.state.usdc + ' $';
                 document.getElementById('total').innerText = d.state.total + ' $';
-                document.getElementById('b_count').innerText = d.state.buy_count;
-                document.getElementById('s_count').innerText = d.state.sell_count;
                 document.getElementById('ai_action').innerText = d.state.last_action;
-                document.getElementById('btc_amt').innerText = d.state.assets.BTC.amount;
-                document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
-                const pEl = document.getElementById('profit');
-                pEl.innerText = (d.state.profit>=0?'+':'') + d.state.profit + ' $';
-                pEl.style.color = d.state.profit>=0?'#0ecb81':'#f6465d';
-                timeLeft = 30;
-                document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-                document.getElementById('b-'+currentRange).classList.add('active');
-                const chartData = {
-                    labels: d.history.map(h => h.t),
-                    datasets: [{
-                        data: d.history.map(h => h.v),
-                        borderColor: '#f3ba2f',
-                        backgroundColor: 'rgba(243, 186, 47, 0.1)',
-                        borderWidth: 2, tension: 0.1, fill: true
-                    }]
-                };
+                document.getElementById('profit').innerText = d.state.profit + ' $';
+                const ctx = document.getElementById('myChart').getContext('2d');
                 if(!chart) {
-                    chart = new Chart(document.getElementById('myChart'), {
-                        type: 'line', data: chartData,
-                        options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } }, x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } } } }
-                    });
-                } else { chart.data = chartData; chart.update(); }
+                    chart = new Chart(ctx, { type: 'line', data: { labels: d.history.map(h=>h.t), datasets: [{ data: d.history.map(h=>h.v), borderColor: '#f3ba2f', fill: true }] }, options: { plugins: { legend: { display: false } } } });
+                } else { chart.data.labels = d.history.map(h=>h.t); chart.data.datasets[0].data = d.history.map(h=>h.v); chart.update(); }
             }
-            setInterval(() => {
-                timeLeft--;
-                document.getElementById('timer').innerText = 'Odświeżanie: ' + timeLeft + 's';
-                if(timeLeft <= 0) update();
-            }, 1000);
-            update();
+            setInterval(update, 30000); update();
         </script>
     </body></html>
     """)
 
 if __name__ == "__main__":
-    run_loop(); app.run(host='0.0.0.0', port=10000)
+    app.run(host='0.0.0.0', port=10000)
