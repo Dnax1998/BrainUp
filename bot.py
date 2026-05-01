@@ -76,8 +76,12 @@ def run_loop():
     try:
         current_time = datetime.now().strftime("%H:%M")
         balance = mexc.fetch_balance()
+        
+        # Pobieramy 'total', aby widzieć też zamrożone środki w ofertach
+        usdc_total_balance = float(balance.get('USDC', {}).get('total', 0.0))
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
-        calculated_total = usdc_free 
+        
+        calculated_total = usdc_total_balance 
         assets_update = {}
         ai_reports = []
 
@@ -87,34 +91,27 @@ def run_loop():
             price = float(ticker['last'])
             total_amt = float(balance.get(symbol, {}).get('total', 0.0))
             calculated_total += (total_amt * price)
+            
             rsi_val = calculate_rsi(symbol)
             
-            # KUPNO
+            # Logika handlu
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
                 if ask_ai_decision(symbol, price, rsi_val):
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
                     mexc.create_order(pair, 'limit', 'buy', qty, price)
-                    
-                    # Aktualizacja średniej ceny zakupu (DCA)
                     current_val = total_amt * avg_buy_prices[symbol]
                     new_val = qty * price
                     avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + qty)
-                    
                     display_state["buy_count"] += 1
-                    ai_reports.append(f"🤖 AI + 🔥 {symbol}: KUPNO (RSI {rsi_val})")
+                    ai_reports.append(f"🤖 KUPNO {symbol}")
                     usdc_free -= TRADE_AMOUNT_USDC
-                else:
-                    ai_reports.append(f"🧊 AI CZEKA: {symbol} (RSI {rsi_val})")
             
-            # SPRZEDAŻ - TYLKO Z ZYSKIEM
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
                 if price > avg_buy_prices[symbol]:
                     mexc.create_order(pair, 'limit', 'sell', total_amt, price)
                     display_state["sell_count"] += 1
-                    ai_reports.append(f"💰 {symbol}: SPRZEDAŻ Z ZYSKIEM (RSI {rsi_val})")
-                    avg_buy_prices[symbol] = 0.0 # Reset po sprzedaży
-                else:
-                    ai_reports.append(f"⏳ {symbol}: Czekam na zysk (Cena: {price} < Zakup: {round(avg_buy_prices[symbol],2)})")
+                    ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
+                    avg_buy_prices[symbol] = 0.0
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
@@ -122,16 +119,12 @@ def run_loop():
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie... (Sal.: {round(usdc_free,1)}$)",
+            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie OK",
             "assets": assets_update
         })
         save_history(calculated_total)
     except Exception as e: 
-        display_state["last_action"] = f"Błąd: {str(e)}"
-
-scheduler = BackgroundScheduler()
-scheduler.add_job(run_loop, 'interval', minutes=1)
-scheduler.start()
+        print(f"Błąd: {e}")
 
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
@@ -160,9 +153,18 @@ def get_data(range_type):
 
 @app.route('/')
 def home():
-    uptime = f"{(datetime.now() - start_time).seconds // 3600}h {((datetime.now() - start_time).seconds // 60) % 60}m"
+    delta = datetime.now() - start_time
+    days = delta.days
+    hours = delta.seconds // 3600
+    minutes = (delta.seconds // 60) % 60
+    
+    if days > 0:
+        uptime_str = f"{days}d {hours}h {minutes}m"
+    else:
+        uptime_str = f"{hours}h {minutes}m"
+
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>BrainUp v11.0 Safe</title>
+    <!DOCTYPE html><html><head><title>AI TRADER v11.0 SAFE</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -184,7 +186,7 @@ def home():
         <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v11.0 SAFE</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
-            <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime+"""</div></div>
+            <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime_str+"""</div></div>
             <div class="card"><div class="label">Zysk (Realny)</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
             <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
