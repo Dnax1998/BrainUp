@@ -33,7 +33,6 @@ display_state = {
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
-# --- NOWOŚĆ: ŚLEDZENIE CENY ZAKUPU ---
 avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
 
 def ask_ai_decision(symbol, price, rsi):
@@ -77,7 +76,6 @@ def run_loop():
         current_time = datetime.now().strftime("%H:%M")
         balance = mexc.fetch_balance()
         
-        # Pobieramy 'total', aby widzieć też zamrożone środki w ofertach
         usdc_total_balance = float(balance.get('USDC', {}).get('total', 0.0))
         usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
         
@@ -94,7 +92,6 @@ def run_loop():
             
             rsi_val = calculate_rsi(symbol)
             
-            # Logika handlu
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
                 if ask_ai_decision(symbol, price, rsi_val):
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
@@ -124,7 +121,7 @@ def run_loop():
         })
         save_history(calculated_total)
     except Exception as e: 
-        print(f"Błąd: {e}")
+        print(f"Błąd pętli: {e}")
 
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
@@ -157,11 +154,7 @@ def home():
     days = delta.days
     hours = delta.seconds // 3600
     minutes = (delta.seconds // 60) % 60
-    
-    if days > 0:
-        uptime_str = f"{days}d {hours}h {minutes}m"
-    else:
-        uptime_str = f"{hours}h {minutes}m"
+    uptime_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
 
     return render_template_string("""
     <!DOCTYPE html><html><head><title>AI TRADER v11.0 SAFE</title>
@@ -195,7 +188,7 @@ def home():
             <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
                 <button id="b-week" onclick="changeRange('week')">Tydzień</button>
-                <button id="b-month" onclick="changeRange('month')")>Miesiąc</button>
+                <button id="b-month" onclick="changeRange('month')">Miesiąc</button>
             </div>
             <canvas id="myChart"></canvas>
         </div>
@@ -248,4 +241,12 @@ def home():
     """)
 
 if __name__ == "__main__":
-    run_loop(); app.run(host='0.0.0.0', port=10000)
+    # --- DODANO HARMONOGRAM ---
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=run_loop, trigger="interval", seconds=30)
+    scheduler.start()
+    
+    # Uruchomienie pierwszy raz ręcznie
+    run_loop()
+    
+    app.run(host='0.0.0.0', port=10000)
