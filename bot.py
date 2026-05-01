@@ -119,7 +119,7 @@ def run_loop():
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie OK",
+            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie... (Sal.: {round(calculated_total, 1)}$)",
             "assets": assets_update
         })
         save_history(calculated_total)
