@@ -13,7 +13,7 @@ STATS_FILE = 'balance_history.json'
 
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0       
-TRADE_AMOUNT_USDC = 200.0      
+TRADE_AMOUNT_USDC = 20.0     
 RSI_BUY_THRESHOLD = 35         
 RSI_SELL_THRESHOLD = 58        
 
