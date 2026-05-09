@@ -34,6 +34,11 @@ display_state = {
 }
 
 avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
+# --- ZMIANA: Dodano licznik czasu dla każdej waluty ---
+last_buy_time = {
+    "BTC": datetime.now() - timedelta(minutes=15), 
+    "ETH": datetime.now() - timedelta(minutes=15)
+}
 
 def ask_ai_decision(symbol, price, rsi):
     try:
@@ -71,7 +76,8 @@ def save_history(val):
         json.dump(history[-20000:], f)
 
 def run_loop():
-    global display_state, avg_buy_prices
+    # --- ZMIANA: Dodano global last_buy_time ---
+    global display_state, avg_buy_prices, last_buy_time
     try:
         current_time = datetime.now().strftime("%H:%M")
         balance = mexc.fetch_balance()
@@ -92,10 +98,17 @@ def run_loop():
             
             rsi_val = calculate_rsi(symbol)
             
-            if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
+            # --- ZMIANA: Sprawdzenie czy minęło 10 minut od ostatniego kupna ---
+            can_buy_again = datetime.now() - last_buy_time[symbol] > timedelta(minutes=10)
+
+            if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC and can_buy_again:
                 if ask_ai_decision(symbol, price, rsi_val):
                     qty = round(TRADE_AMOUNT_USDC / price, 6)
-                    mexc.create_order(pair, 'limit', 'buy', qty, price)
+                    # --- ZMIANA: Typ market zamiast limit i usunięcie ceny z create_order ---
+                    mexc.create_order(pair, 'market', 'buy', qty)
+                    
+                    last_buy_time[symbol] = datetime.now()
+                    
                     current_val = total_amt * avg_buy_prices[symbol]
                     new_val = qty * price
                     avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + qty)
@@ -105,7 +118,8 @@ def run_loop():
             
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
                 if price > avg_buy_prices[symbol]:
-                    mexc.create_order(pair, 'limit', 'sell', total_amt, price)
+                    # --- ZMIANA: Typ market zamiast limit dla sprzedaży ---
+                    mexc.create_order(pair, 'market', 'sell', total_amt)
                     display_state["sell_count"] += 1
                     ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
                     avg_buy_prices[symbol] = 0.0
@@ -241,12 +255,8 @@ def home():
     """)
 
 if __name__ == "__main__":
-    # --- DODANO HARMONOGRAM ---
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=run_loop, trigger="interval", seconds=30)
     scheduler.start()
-    
-    # Uruchomienie pierwszy raz ręcznie
     run_loop()
-    
     app.run(host='0.0.0.0', port=10000)
