@@ -99,10 +99,11 @@ def run_loop():
 
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC and can_buy_again:
                 if ask_ai_decision(symbol, price, rsi_val):
-                    # POPRAWKA: Margines na opłaty i precyzja dla ETH
-                    qty = (TRADE_AMOUNT_USDC / price) * 0.995 
+                    # POPRAWKA: Dynamiczna precyzja ilości dla ETH (4 miejsca) i BTC (6 miejsc)
+                    # Dodano margines 0.5% na opłaty, aby zlecenie nie przekroczyło salda
+                    qty_raw = (TRADE_AMOUNT_USDC / price) * 0.995
                     precision = 6 if symbol == "BTC" else 4
-                    qty = round(qty, precision)
+                    qty = round(qty_raw, precision)
                     
                     try:
                         mexc.create_order(pair, 'market', 'buy', qty)
@@ -115,6 +116,7 @@ def run_loop():
                         ai_reports.append(f"🤖 KUPNO {symbol}")
                         usdc_free -= TRADE_AMOUNT_USDC
                     except Exception as e:
+                        print(f"Błąd zlecenia {symbol}: {e}")
                         ai_reports.append(f"❌ BŁĄD {symbol}")
 
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
@@ -128,7 +130,7 @@ def run_loop():
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
-        # POPRAWKA: Wyświetlanie RSI obu walut, gdy bot tylko skanuje
+        # Status pokazuje teraz RSI obu walut w czasie rzeczywistym
         status_msg = " | ".join(ai_reports) if ai_reports else f"[{current_time}] BTC RSI: {assets_update['BTC']['rsi']} | ETH RSI: {assets_update['ETH']['rsi']}"
 
         display_state.update({
@@ -140,7 +142,7 @@ def run_loop():
         })
         save_history(calculated_total)
     except Exception as e: 
-        print(f"Błąd: {e}")
+        print(f"Błąd krytyczny pętli: {e}")
 
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
@@ -172,7 +174,7 @@ def home():
     delta = datetime.now() - start_time
     uptime_str = f"{delta.days}d {delta.seconds // 3600}h {(delta.seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>AI TRADER v11.1</title>
+    <!DOCTYPE html><html><head><title>AI TRADER v11.1 SAFE</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -191,14 +193,14 @@ def home():
     </style></head>
     <body>
         <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v11.1</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v11.1 SAFE</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime_str+"""</div></div>
-            <div class="card"><div class="label">Zysk</div><div id="profit" class="value">--</div><div class="sub-label">S: <b id="s_count" style="color:white;">0</b></div></div>
-            <div class="card"><div class="label">Portfolio</div><div id="total" class="value">--</div><div class="sub-label">K: <b id="b_count" style="color:white;">0</b></div></div>
+            <div class="card"><div class="label">Zysk (Realny)</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
+            <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
-        <div class="ai-box"><b>Status:</b><br><span id="ai_action">Skanowanie...</span></div>
+        <div class="ai-box"><b>Status Systemu:</b><br><span id="ai_action">Skanowanie...</span></div>
         <div class="chart-container">
             <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
@@ -231,13 +233,25 @@ def home():
                 document.getElementById('b-'+currentRange).classList.add('active');
                 const chartData = {
                     labels: d.history.map(h => h.t),
-                    datasets: [{ data: d.history.map(h => h.v), borderColor: '#f3ba2f', backgroundColor: 'rgba(243, 186, 47, 0.1)', borderWidth: 2, tension: 0.1, fill: true }]
+                    datasets: [{
+                        data: d.history.map(h => h.v),
+                        borderColor: '#f3ba2f',
+                        backgroundColor: 'rgba(243, 186, 47, 0.1)',
+                        borderWidth: 2, tension: 0.1, fill: true
+                    }]
                 };
                 if(!chart) {
-                    chart = new Chart(document.getElementById('myChart'), { type: 'line', data: chartData, options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } }, x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } } } } });
+                    chart = new Chart(document.getElementById('myChart'), {
+                        type: 'line', data: chartData,
+                        options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } }, x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } } } }
+                    });
                 } else { chart.data = chartData; chart.update(); }
             }
-            setInterval(() => { timeLeft--; document.getElementById('timer').innerText = 'Odświeżanie: ' + timeLeft + 's'; if(timeLeft <= 0) update(); }, 1000);
+            setInterval(() => {
+                timeLeft--;
+                document.getElementById('timer').innerText = 'Odświeżanie: ' + timeLeft + 's';
+                if(timeLeft <= 0) update();
+            }, 1000);
             update();
         </script>
     </body></html>
