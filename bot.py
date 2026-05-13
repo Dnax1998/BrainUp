@@ -34,7 +34,6 @@ display_state = {
 }
 
 avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
-# --- ZMIANA: Dodano licznik czasu dla każdej waluty ---
 last_buy_time = {
     "BTC": datetime.now() - timedelta(minutes=15), 
     "ETH": datetime.now() - timedelta(minutes=15)
@@ -76,7 +75,6 @@ def save_history(val):
         json.dump(history[-20000:], f)
 
 def run_loop():
-    # --- ZMIANA: Dodano global last_buy_time ---
     global display_state, avg_buy_prices, last_buy_time
     try:
         current_time = datetime.now().strftime("%H:%M")
@@ -97,45 +95,52 @@ def run_loop():
             calculated_total += (total_amt * price)
             
             rsi_val = calculate_rsi(symbol)
-            
-            # --- ZMIANA: Sprawdzenie czy minęło 10 minut od ostatniego kupna ---
             can_buy_again = datetime.now() - last_buy_time[symbol] > timedelta(minutes=10)
 
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC and can_buy_again:
                 if ask_ai_decision(symbol, price, rsi_val):
-                    qty = round(TRADE_AMOUNT_USDC / price, 6)
-                    # --- ZMIANA: Typ market zamiast limit i usunięcie ceny z create_order ---
-                    mexc.create_order(pair, 'market', 'buy', qty)
+                    # POPRAWKA: Margines na opłaty i precyzja dla ETH
+                    qty = (TRADE_AMOUNT_USDC / price) * 0.995 
+                    precision = 6 if symbol == "BTC" else 4
+                    qty = round(qty, precision)
                     
-                    last_buy_time[symbol] = datetime.now()
-                    
-                    current_val = total_amt * avg_buy_prices[symbol]
-                    new_val = qty * price
-                    avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + qty)
-                    display_state["buy_count"] += 1
-                    ai_reports.append(f"🤖 KUPNO {symbol}")
-                    usdc_free -= TRADE_AMOUNT_USDC
-            
+                    try:
+                        mexc.create_order(pair, 'market', 'buy', qty)
+                        last_buy_time[symbol] = datetime.now()
+                        
+                        current_val = total_amt * avg_buy_prices[symbol]
+                        new_val = qty * price
+                        avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + qty)
+                        display_state["buy_count"] += 1
+                        ai_reports.append(f"🤖 KUPNO {symbol}")
+                        usdc_free -= TRADE_AMOUNT_USDC
+                    except Exception as e:
+                        ai_reports.append(f"❌ BŁĄD {symbol}")
+
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
                 if price > avg_buy_prices[symbol]:
-                    # --- ZMIANA: Typ market zamiast limit dla sprzedaży ---
-                    mexc.create_order(pair, 'market', 'sell', total_amt)
-                    display_state["sell_count"] += 1
-                    ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
-                    avg_buy_prices[symbol] = 0.0
+                    try:
+                        mexc.create_order(pair, 'market', 'sell', total_amt)
+                        display_state["sell_count"] += 1
+                        ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
+                        avg_buy_prices[symbol] = 0.0
+                    except: pass
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
+
+        # POPRAWKA: Wyświetlanie RSI obu walut, gdy bot tylko skanuje
+        status_msg = " | ".join(ai_reports) if ai_reports else f"[{current_time}] BTC RSI: {assets_update['BTC']['rsi']} | ETH RSI: {assets_update['ETH']['rsi']}"
 
         display_state.update({
             "usdc": round(usdc_free, 2),
             "total": round(calculated_total, 2),
             "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(ai_reports) if ai_reports else f"[{current_time}] Skanowanie... (Sal.: {round(calculated_total, 1)}$)",
+            "last_action": status_msg,
             "assets": assets_update
         })
         save_history(calculated_total)
     except Exception as e: 
-        print(f"Błąd pętli: {e}")
+        print(f"Błąd: {e}")
 
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
@@ -165,13 +170,9 @@ def get_data(range_type):
 @app.route('/')
 def home():
     delta = datetime.now() - start_time
-    days = delta.days
-    hours = delta.seconds // 3600
-    minutes = (delta.seconds // 60) % 60
-    uptime_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
-
+    uptime_str = f"{delta.days}d {delta.seconds // 3600}h {(delta.seconds // 60) % 60}m"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>AI TRADER v11.0 SAFE</title>
+    <!DOCTYPE html><html><head><title>AI TRADER v11.1</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -190,14 +191,14 @@ def home():
     </style></head>
     <body>
         <div id="timer">Odświeżanie: 30s</div>
-        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v11.0 SAFE</h3>
+        <h3 style="color: #f3ba2f; text-align:center;">🧠 AI TRADER v11.1</h3>
         <div class="grid">
             <div class="card"><div class="label">USDC Wolne</div><div class="value" id="usdc">--</div></div>
             <div class="card"><div class="label">Uptime</div><div class="value">"""+uptime_str+"""</div></div>
-            <div class="card"><div class="label">Zysk (Realny)</div><div id="profit" class="value">--</div><div class="sub-label">Sprzedaże: <b id="s_count" style="color:white;">0</b></div></div>
-            <div class="card"><div class="label">Wartość Portfela</div><div id="total" class="value">--</div><div class="sub-label">Kupna: <b id="b_count" style="color:white;">0</b></div></div>
+            <div class="card"><div class="label">Zysk</div><div id="profit" class="value">--</div><div class="sub-label">S: <b id="s_count" style="color:white;">0</b></div></div>
+            <div class="card"><div class="label">Portfolio</div><div id="total" class="value">--</div><div class="sub-label">K: <b id="b_count" style="color:white;">0</b></div></div>
         </div>
-        <div class="ai-box"><b>Llama 3 Active Decision:</b><br><span id="ai_action">Skanowanie...</span></div>
+        <div class="ai-box"><b>Status:</b><br><span id="ai_action">Skanowanie...</span></div>
         <div class="chart-container">
             <div style="display:flex; justify-content:center; gap:5px; margin-bottom:15px;">
                 <button id="b-day" onclick="changeRange('day')" class="active">Dzień</button>
@@ -230,25 +231,13 @@ def home():
                 document.getElementById('b-'+currentRange).classList.add('active');
                 const chartData = {
                     labels: d.history.map(h => h.t),
-                    datasets: [{
-                        data: d.history.map(h => h.v),
-                        borderColor: '#f3ba2f',
-                        backgroundColor: 'rgba(243, 186, 47, 0.1)',
-                        borderWidth: 2, tension: 0.1, fill: true
-                    }]
+                    datasets: [{ data: d.history.map(h => h.v), borderColor: '#f3ba2f', backgroundColor: 'rgba(243, 186, 47, 0.1)', borderWidth: 2, tension: 0.1, fill: true }]
                 };
                 if(!chart) {
-                    chart = new Chart(document.getElementById('myChart'), {
-                        type: 'line', data: chartData,
-                        options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } }, x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } } } }
-                    });
+                    chart = new Chart(document.getElementById('myChart'), { type: 'line', data: chartData, options: { animation: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#2b3139' }, ticks: { color: '#848e9c' } }, x: { grid: { display: true, color: '#2b3139' }, ticks: { color: '#848e9c' } } } } });
                 } else { chart.data = chartData; chart.update(); }
             }
-            setInterval(() => {
-                timeLeft--;
-                document.getElementById('timer').innerText = 'Odświeżanie: ' + timeLeft + 's';
-                if(timeLeft <= 0) update();
-            }, 1000);
+            setInterval(() => { timeLeft--; document.getElementById('timer').innerText = 'Odświeżanie: ' + timeLeft + 's'; if(timeLeft <= 0) update(); }, 1000);
             update();
         </script>
     </body></html>
