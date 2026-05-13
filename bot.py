@@ -20,12 +20,12 @@ RSI_SELL_THRESHOLD = 58
 mexc = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
     'secret': os.getenv('MEXC_SECRET_KEY'),
-    'options': {
-        'defaultType': 'spot',
-        'createMarketBuyOrderRequiresPrice': False  # Kluczowe dla MEXC
-    },
+    'options': {'defaultType': 'spot'},
     'enableRateLimit': True
 })
+
+# Załaduj rynki, aby bot znał precyzję (kropki dziesiętne) dla ETH i BTC
+mexc.load_markets()
 
 groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 
@@ -103,16 +103,23 @@ def run_loop():
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC and can_buy_again:
                 if ask_ai_decision(symbol, price, rsi_val):
                     try:
-                        # --- ZMIANA: Kupno po markecie za USD, co eliminuje błąd precyzji ETH ---
-                        mexc.create_market_buy_order(pair, TRADE_AMOUNT_USDC)
+                        # Wyliczamy ilość z uwzględnieniem precyzji danej monety na MEXC
+                        amount_to_buy = TRADE_AMOUNT_USDC / price
+                        formatted_amount = float(mexc.amount_to_precision(pair, amount_to_buy))
+                        
+                        # Zlecenie rynkowe kupna
+                        mexc.create_order(pair, 'market', 'buy', formatted_amount)
                         
                         last_buy_time[symbol] = datetime.now()
-                        avg_buy_prices[symbol] = price
+                        current_val = total_amt * avg_buy_prices[symbol]
+                        new_val = formatted_amount * price
+                        avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + formatted_amount)
+                        
                         display_state["buy_count"] += 1
                         ai_reports.append(f"🤖 KUPNO {symbol}")
                         usdc_free -= TRADE_AMOUNT_USDC
                     except Exception as e:
-                        print(f"Błąd zlecenia {symbol}: {e}")
+                        print(f"Błąd zakupu {symbol}: {e}")
                         ai_reports.append(f"❌ BŁĄD {symbol}")
             
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
@@ -145,6 +152,7 @@ def get_data(range_type):
         except: history = []
     now = datetime.now()
     points = []
+    # Logika wykresu (bez zmian)
     if range_type == 'day':
         for i in range(23, -1, -1):
             target = now - timedelta(hours=i)
@@ -165,9 +173,7 @@ def get_data(range_type):
 @app.route('/')
 def home():
     delta = datetime.now() - start_time
-    days = delta.days
-    hours = delta.seconds // 3600
-    minutes = (delta.seconds // 60) % 60
+    days, hours, minutes = delta.days, delta.seconds // 3600, (delta.seconds // 60) % 60
     uptime_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
 
     return render_template_string("""
