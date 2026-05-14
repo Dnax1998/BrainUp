@@ -1,22 +1,18 @@
-import os
-import json
-import ccxt
-import pandas as pd
+import os, json, ccxt, pandas as pd
 from flask import Flask, render_template_string, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from groq import Groq
 
 app = Flask('')
-start_time = datetime.now()
 STATS_FILE = 'balance_history.json'
 
 # --- KONFIGURACJA ---
-INITIAL_CAPITAL = 1000.0       
-TRADE_AMOUNT_USDC = 20.0     
-RSI_BUY_THRESHOLD = 35         
-RSI_SELL_THRESHOLD = 58        
-COOLDOWN_MINUTES = 20  
+INITIAL_CAPITAL = 1000.0
+TRADE_AMOUNT_USDC = 22.0  # Lekko zwiększone, by uniknąć progu "min cost"
+RSI_BUY_THRESHOLD = 35
+RSI_SELL_THRESHOLD = 58
+COOLDOWN_MINUTES = 15
 
 mexc = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -27,97 +23,91 @@ mexc = ccxt.mexc({
 
 groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 
-display_state = {
+# Stan bota
+state = {
     "usdc": 0.0, "total": 0.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
-    "last_action": "System Start...",
+    "last_action": "System Ready",
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
-avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
 last_buy_time = {"BTC": datetime.now() - timedelta(hours=1), "ETH": datetime.now() - timedelta(hours=1)}
 
-def ask_ai_decision(symbol, price, rsi):
+def get_rsi(symbol):
     try:
-        prompt = f"Analiza {symbol}: Cena {price}, RSI {rsi}. Kupujemy? Odpowiedz tylko TAK lub NIE."
-        completion = groq_client.chat.completions.create(
-            model="llama3-8b-8192", messages=[{"role": "user", "content": prompt}], max_tokens=5
-        )
-        return "TAK" in completion.choices[0].message.content.strip().upper()
-    except: return True 
-
-def calculate_rsi(symbol):
-    try:
-        pair = f"{symbol}/USDC"
-        bars = mexc.fetch_ohlcv(pair, timeframe='1m', limit=50)
+        bars = mexc.fetch_ohlcv(f"{symbol}/USDC", timeframe='1m', limit=50)
         df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
         delta = df['c'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / loss)))
         return round(rsi.iloc[-1], 1)
     except: return 50.0
 
-def run_loop():
-    global display_state, avg_buy_prices, last_buy_time
+def trade_logic():
+    global state, last_buy_time
     try:
-        mexc.load_markets() # Odświeżanie limitów giełdy co cykl
+        mexc.load_markets()
         balance = mexc.fetch_balance()
-        usdc_free = float(balance.get('USDC', {}).get('free', 0.0))
-        calculated_total = float(balance.get('USDC', {}).get('total', 0.0))
+        usdc_now = float(balance.get('USDC', {}).get('free', 0.0))
+        total_val = float(balance.get('USDC', {}).get('total', 0.0))
         
-        reports = []
-        for symbol in ["BTC", "ETH"]:
-            pair = f"{symbol}/USDC"
+        actions = []
+
+        for sym in ["BTC", "ETH"]:
+            pair = f"{sym}/USDC"
             ticker = mexc.fetch_ticker(pair)
             price = float(ticker['last'])
-            total_amt = float(balance.get(symbol, {}).get('total', 0.0))
-            calculated_total += (total_amt * price)
-            rsi_val = calculate_rsi(symbol)
+            owned = float(balance.get(sym, {}).get('total', 0.0))
+            total_val += (owned * price)
             
-            # Logika KUPNA
-            if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
-                if (datetime.now() - last_buy_time[symbol]) > timedelta(minutes=COOLDOWN_MINUTES):
-                    if ask_ai_decision(symbol, price, rsi_val):
-                        try:
-                            # KLUCZOWA NAPRAWA: Precyzja ilości dla ETH
-                            amount = TRADE_AMOUNT_USDC / price
-                            precision = mexc.markets[pair]['precision']['amount']
-                            qty = float(mexc.amount_to_precision(pair, amount))
-                            
-                            mexc.create_market_buy_order(pair, qty)
-                            
-                            last_buy_time[symbol] = datetime.now()
-                            avg_buy_prices[symbol] = price
-                            display_state["buy_count"] += 1
-                            reports.append(f"✅ KUPIONO {symbol}")
-                        except Exception as e:
-                            print(f"Błąd kupna {symbol}: {e}")
-                            reports.append(f"❌ BŁĄD {symbol}")
+            rsi = get_rsi(sym)
+            state["assets"][sym] = {"amount": round(owned, 6), "rsi": rsi}
 
-            # Logika SPRZEDAŻY
-            elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
-                if price > (avg_buy_prices[symbol] * 1.005): # Min. 0.5% zysku
+            # LOGIKA KUPNA (LIMIT ORDER jako pseudo-market)
+            if rsi < RSI_BUY_THRESHOLD and usdc_now >= TRADE_AMOUNT_USDC:
+                if datetime.now() - last_buy_time[sym] > timedelta(minutes=COOLDOWN_MINUTES):
                     try:
-                        qty_sell = float(mexc.amount_to_precision(pair, total_amt))
-                        mexc.create_market_sell_order(pair, qty_sell)
-                        display_state["sell_count"] += 1
-                        reports.append(f"💰 SPRZEDANO {symbol}")
+                        # Obliczamy ilość i cenę (0.1% powyżej rynkowej, by weszło od razu)
+                        buy_price = price * 1.001 
+                        qty = TRADE_AMOUNT_USDC / buy_price
+                        
+                        # Formatuje cenę i ilość zgodnie z wymogami MEXC
+                        prec_price = mexc.price_to_precision(pair, buy_price)
+                        prec_qty = mexc.amount_to_precision(pair, qty)
+                        
+                        mexc.create_order(pair, 'limit', 'buy', prec_qty, prec_price)
+                        
+                        last_buy_time[sym] = datetime.now()
+                        state["buy_count"] += 1
+                        actions.append(f"✅ BUY {sym} @ {prec_price}")
                     except Exception as e:
-                        print(f"Błąd sprzedaży {symbol}: {e}")
+                        actions.append(f"❌ ERR {sym}: {str(e)[:20]}")
 
-            display_state["assets"][symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
+            # LOGIKA SPRZEDAŻY
+            elif rsi > RSI_SELL_THRESHOLD and owned > 0:
+                try:
+                    sell_price = price * 0.999 # 0.1% poniżej rynku, by sprzedać natychmiast
+                    prec_price = mexc.price_to_precision(pair, sell_price)
+                    prec_qty = mexc.amount_to_precision(pair, owned)
+                    
+                    mexc.create_order(pair, 'limit', 'sell', prec_qty, prec_price)
+                    state["sell_count"] += 1
+                    actions.append(f"💰 SELL {sym}")
+                except Exception as e:
+                    actions.append(f"❌ SELL ERR {sym}")
 
-        display_state.update({
-            "usdc": round(usdc_free, 2),
-            "total": round(calculated_total, 2),
-            "profit": round(calculated_total - INITIAL_CAPITAL, 2),
-            "last_action": " | ".join(reports) if reports else f"Skanowanie {datetime.now().strftime('%H:%M')}"
+        state.update({
+            "usdc": round(usdc_now, 2),
+            "total": round(total_val, 2),
+            "profit": round(total_val - INITIAL_CAPITAL, 2),
+            "last_action": " | ".join(actions) if actions else f"Scanning... ({datetime.now().strftime('%H:%M')})"
         })
-    except Exception as e: print(f"Pętla: {e}")
+    except Exception as e:
+        state["last_action"] = f"CRITICAL ERR: {str(e)[:30]}"
 
 @app.route('/api/data')
-def get_data(): return jsonify(display_state)
+def get_data(): return jsonify(state)
 
 @app.route('/')
 def home():
@@ -125,39 +115,52 @@ def home():
     <!DOCTYPE html><html><head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { background: #000; color: #0f0; font-family: monospace; padding: 20px; }
-        .box { border: 1px solid #0f0; padding: 15px; margin-bottom: 10px; border-radius: 5px; }
-        .val { color: #fff; font-size: 1.5em; }
-        .ai { color: #f3ba2f; font-weight: bold; border-color: #f3ba2f; }
+        body { background: #050505; color: #00ff41; font-family: 'Courier New', monospace; padding: 20px; }
+        .card { border: 2px solid #00ff41; padding: 15px; margin-bottom: 15px; background: #000; box-shadow: 0 0 10px #00ff41; }
+        .label { color: #888; font-size: 0.8em; }
+        .val { font-size: 1.4em; display: block; }
+        .status { color: #ffbc00; border-color: #ffbc00; box-shadow: 0 0 10px #ffbc00; }
+        .asset-row { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding: 5px 0; }
     </style></head>
     <body>
-        <h2>V12.0 TERMINAL</h2>
-        <div class="box">USDC: <span class="val" id="usdc">--</span></div>
-        <div class="box">TOTAL: <span class="val" id="total">--</span></div>
-        <div class="box ai">STATUS: <br><span id="action">--</span></div>
-        <div class="box">
-            BTC: <span id="btc_rsi">--</span> RSI | <span id="btc_amt">--</span><br>
-            ETH: <span id="eth_rsi">--</span> RSI | <span id="eth_amt">--</span>
+        <div class="card">
+            <span class="label">WALLET (USDC)</span>
+            <span class="val" id="usdc">0.00</span>
+        </div>
+        <div class="card">
+            <span class="label">TOTAL EQUITY</span>
+            <span class="val" id="total">0.00</span>
+        </div>
+        <div class="card status">
+            <span class="label" style="color:#ffbc00">SYSTEM LOG</span>
+            <span class="val" id="log">INITIALIZING...</span>
+        </div>
+        <div class="card">
+            <div class="asset-row"><b>ASSET</b><b>RSI</b><b>HOLDING</b></div>
+            <div class="asset-row"><span>BTC</span><span id="btc_rsi">--</span><span id="btc_amt">--</span></div>
+            <div class="asset-row"><span>ETH</span><span id="eth_rsi">--</span><span id="eth_amt">--</span></div>
         </div>
         <script>
-            async function upd() {
-                const r = await fetch('/api/data'); const d = await r.json();
-                document.getElementById('usdc').innerText = d.usdc + ' $';
-                document.getElementById('total').innerText = d.total + ' $';
-                document.getElementById('action').innerText = d.last_action;
-                document.getElementById('btc_rsi').innerText = d.assets.BTC.rsi;
-                document.getElementById('eth_rsi').innerText = d.assets.ETH.rsi;
-                document.getElementById('btc_amt').innerText = d.assets.BTC.amount + ' BTC';
-                document.getElementById('eth_amt').innerText = d.assets.ETH.amount + ' ETH';
+            async function update() {
+                try {
+                    const r = await fetch('/api/data'); const d = await r.json();
+                    document.getElementById('usdc').innerText = d.usdc + ' $';
+                    document.getElementById('total').innerText = d.total + ' $';
+                    document.getElementById('log').innerText = d.last_action;
+                    document.getElementById('btc_rsi').innerText = d.assets.BTC.rsi;
+                    document.getElementById('eth_rsi').innerText = d.assets.ETH.rsi;
+                    document.getElementById('btc_amt').innerText = d.assets.BTC.amount;
+                    document.getElementById('eth_amt').innerText = d.assets.ETH.amount;
+                } catch(e) {}
             }
-            setInterval(upd, 5000); upd();
+            setInterval(update, 5000); update();
         </script>
     </body></html>
     """)
 
 if __name__ == "__main__":
     scheduler = BackgroundScheduler()
-    scheduler.add_job(func=run_loop, trigger="interval", seconds=30)
+    scheduler.add_job(func=trade_logic, trigger="interval", seconds=30)
     scheduler.start()
-    run_loop()
+    trade_logic()
     app.run(host='0.0.0.0', port=10000)
