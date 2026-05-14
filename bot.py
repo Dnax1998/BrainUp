@@ -25,7 +25,7 @@ mexc = ccxt.mexc({
     'enableRateLimit': True
 })
 
-# Krytyczne dla poprawnego działania ETH i BTC: ładowanie limitów giełdy
+# Krytyczne: Wstępne ładowanie rynków, aby bot znał reguły precyzji dla ETH i BTC
 try:
     mexc.load_markets()
 except Exception as e:
@@ -42,7 +42,7 @@ display_state = {
 
 avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
 
-# Inicjalizacja czasu ostatniego zakupu (pozwala na start od razu)
+# Słownik do pilnowania czasu ostatniego zakupu dla każdej monety z osobna
 last_buy_time = {
     "BTC": datetime.now() - timedelta(minutes=COOLDOWN_MINUTES), 
     "ETH": datetime.now() - timedelta(minutes=COOLDOWN_MINUTES)
@@ -69,8 +69,7 @@ def calculate_rsi(symbol):
         delta = df['c'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
+        rsi = 100 - (100 / (1 + (gain / loss)))
         return round(rsi.iloc[-1], 1)
     except: return 50.0
 
@@ -106,7 +105,7 @@ def run_loop():
             
             rsi_val = calculate_rsi(symbol)
             
-            # Sprawdzenie blokady czasowej (Cooldown)
+            # Sprawdzanie czy minął czas blokady dla danej monety
             time_since_buy = datetime.now() - last_buy_time[symbol]
             is_cooled_down = time_since_buy > timedelta(minutes=COOLDOWN_MINUTES)
 
@@ -114,12 +113,14 @@ def run_loop():
             if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC and is_cooled_down:
                 if ask_ai_decision(symbol, price, rsi_val):
                     try:
-                        # Precyzyjne wyliczanie ilości (naprawia błąd ETH)
+                        # POPRAWKA ETH: Wykorzystanie precyzji ilości z giełdy
                         raw_qty = TRADE_AMOUNT_USDC / price
                         qty = float(mexc.amount_to_precision(pair, raw_qty))
                         
+                        # Wysyłanie zlecenia rynkowego (Market) - pewniejsze wykonanie
                         mexc.create_order(pair, 'market', 'buy', qty)
                         
+                        # Reset czasu blokady tylko po udanym zakupie
                         last_buy_time[symbol] = datetime.now()
                         
                         current_val = total_amt * avg_buy_prices[symbol]
@@ -129,22 +130,21 @@ def run_loop():
                         ai_reports.append(f"🤖 KUPNO {symbol}")
                         usdc_free -= TRADE_AMOUNT_USDC
                     except Exception as e:
-                        print(f"Błąd zlecenia KUPNA {symbol}: {e}")
+                        print(f"Błąd zlecenia {symbol}: {e}")
                         ai_reports.append(f"❌ BŁĄD {symbol}")
             
             # --- LOGIKA SPRZEDAŻY ---
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
                 if price > avg_buy_prices[symbol]:
                     try:
-                        # Sprzedaż wszystkiego co mamy dla danego symbolu
-                        qty_to_sell = float(mexc.amount_to_precision(pair, total_amt))
-                        mexc.create_order(pair, 'market', 'sell', qty_to_sell)
-                        
+                        # Sprzedaż całości posiadanej monety z uwzględnieniem precyzji
+                        qty_sell = float(mexc.amount_to_precision(pair, total_amt))
+                        mexc.create_order(pair, 'market', 'sell', qty_sell)
                         display_state["sell_count"] += 1
                         ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
                         avg_buy_prices[symbol] = 0.0
                     except Exception as e:
-                        print(f"Błąd zlecenia SPRZEDAŻY {symbol}: {e}")
+                        print(f"Błąd sprzedaży {symbol}: {e}")
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
@@ -167,7 +167,6 @@ def get_data(range_type):
         except: history = []
     now = datetime.now()
     points = []
-    # Logika filtracji wykresu (bez zmian)
     if range_type == 'day':
         for i in range(23, -1, -1):
             target = now - timedelta(hours=i)
@@ -188,9 +187,7 @@ def get_data(range_type):
 @app.route('/')
 def home():
     delta = datetime.now() - start_time
-    days, hours, minutes = delta.days, delta.seconds // 3600, (delta.seconds // 60) % 60
-    uptime_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
-
+    uptime_str = f"{delta.days}d {delta.seconds // 3600}h {(delta.seconds // 60) % 60}m"
     return render_template_string("""
     <!DOCTYPE html><html><head><title>AI TRADER v11.0 SAFE</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
