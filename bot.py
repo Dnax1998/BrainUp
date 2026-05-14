@@ -1,4 +1,4 @@
-import  os
+import os
 import json
 import ccxt
 import pandas as pd
@@ -16,6 +16,7 @@ INITIAL_CAPITAL = 1000.0
 TRADE_AMOUNT_USDC = 20     
 RSI_BUY_THRESHOLD = 35         
 RSI_SELL_THRESHOLD = 58        
+COOLDOWN_MINUTES = 30  # <--- NOWOŚĆ: Bot kupi daną monetę maksymalnie raz na 30 minut
 
 mexc = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -23,6 +24,9 @@ mexc = ccxt.mexc({
     'options': {'defaultType': 'spot'},
     'enableRateLimit': True
 })
+
+# Załadowanie rynków, aby bot znał precyzję (kropki dziesiętne)
+mexc.load_markets()
 
 groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 
@@ -34,6 +38,12 @@ display_state = {
 }
 
 avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
+
+# Słownik przechowujący czas ostatniego zakupu dla każdej monety
+last_buy_time = {
+    "BTC": datetime.now() - timedelta(minutes=COOLDOWN_MINUTES), 
+    "ETH": datetime.now() - timedelta(minutes=COOLDOWN_MINUTES)
+}
 
 def ask_ai_decision(symbol, price, rsi):
     try:
@@ -71,7 +81,7 @@ def save_history(val):
         json.dump(history[-20000:], f)
 
 def run_loop():
-    global display_state, avg_buy_prices
+    global display_state, avg_buy_prices, last_buy_time
     try:
         current_time = datetime.now().strftime("%H:%M")
         balance = mexc.fetch_balance()
@@ -92,23 +102,40 @@ def run_loop():
             
             rsi_val = calculate_rsi(symbol)
             
-            if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC:
+            # --- LOGIKA COOLDOWN ---
+            time_since_last_buy = datetime.now() - last_buy_time[symbol]
+            is_cooled_down = time_since_last_buy > timedelta(minutes=COOLDOWN_MINUTES)
+            
+            if rsi_val < RSI_BUY_THRESHOLD and usdc_free >= TRADE_AMOUNT_USDC and is_cooled_down:
                 if ask_ai_decision(symbol, price, rsi_val):
-                    qty = round(TRADE_AMOUNT_USDC / price, 6)
-                    mexc.create_order(pair, 'limit', 'buy', qty, price)
-                    current_val = total_amt * avg_buy_prices[symbol]
-                    new_val = qty * price
-                    avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + qty)
-                    display_state["buy_count"] += 1
-                    ai_reports.append(f"🤖 KUPNO {symbol}")
-                    usdc_free -= TRADE_AMOUNT_USDC
+                    try:
+                        # Używamy zlecenia rynkowego dla pewności zakupu przy DCA
+                        qty_raw = TRADE_AMOUNT_USDC / price
+                        qty = float(mexc.amount_to_precision(pair, qty_raw))
+                        
+                        mexc.create_order(pair, 'market', 'buy', qty)
+                        
+                        # Aktualizacja czasu ostatniego zakupu
+                        last_buy_time[symbol] = datetime.now()
+                        
+                        current_val = total_amt * avg_buy_prices[symbol]
+                        new_val = qty * price
+                        avg_buy_prices[symbol] = (current_val + new_val) / (total_amt + qty)
+                        display_state["buy_count"] += 1
+                        ai_reports.append(f"🤖 KUPNO {symbol}")
+                        usdc_free -= TRADE_AMOUNT_USDC
+                    except Exception as e:
+                        ai_reports.append(f"❌ BŁĄD {symbol}")
+                        print(f"Błąd zlecenia {symbol}: {e}")
             
             elif rsi_val > RSI_SELL_THRESHOLD and total_amt > 0:
                 if price > avg_buy_prices[symbol]:
-                    mexc.create_order(pair, 'limit', 'sell', total_amt, price)
-                    display_state["sell_count"] += 1
-                    ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
-                    avg_buy_prices[symbol] = 0.0
+                    try:
+                        mexc.create_order(pair, 'market', 'sell', total_amt)
+                        display_state["sell_count"] += 1
+                        ai_reports.append(f"💰 SPRZEDAŻ {symbol}")
+                        avg_buy_prices[symbol] = 0.0
+                    except: pass
 
             assets_update[symbol] = {"amount": round(total_amt, 6), "rsi": rsi_val}
 
@@ -123,6 +150,7 @@ def run_loop():
     except Exception as e: 
         print(f"Błąd pętli: {e}")
 
+# Funkcje Flask (get_data, home) pozostają bez zmian
 @app.route('/api/data/<range_type>')
 def get_data(range_type):
     if not os.path.exists(STATS_FILE): return jsonify({"state": display_state, "history": []})
@@ -151,11 +179,8 @@ def get_data(range_type):
 @app.route('/')
 def home():
     delta = datetime.now() - start_time
-    days = delta.days
-    hours = delta.seconds // 3600
-    minutes = (delta.seconds // 60) % 60
+    days, hours, minutes = delta.days, delta.seconds // 3600, (delta.seconds // 60) % 60
     uptime_str = f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
-
     return render_template_string("""
     <!DOCTYPE html><html><head><title>AI TRADER v11.0 SAFE</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -238,15 +263,11 @@ def home():
             update();
         </script>
     </body></html>
-    """)
+    """, uptime_str=uptime_str)
 
 if __name__ == "__main__":
-    # --- DODANO HARMONOGRAM ---
     scheduler = BackgroundScheduler()
     scheduler.add_job(func=run_loop, trigger="interval", seconds=30)
     scheduler.start()
-    
-    # Uruchomienie pierwszy raz ręcznie
     run_loop()
-    
     app.run(host='0.0.0.0', port=10000)
