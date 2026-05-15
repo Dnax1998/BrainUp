@@ -5,11 +5,12 @@ from datetime import datetime, timedelta
 from groq import Groq
 
 app = Flask('')
+# Plik do przechowywania historii salda, aby wykres nie znikał po restarcie
 STATS_FILE = 'balance_history.json'
 
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0
-TRADE_AMOUNT_USDC = 50  # Lekko zwiększone, by uniknąć progu "min cost"
+TRADE_AMOUNT_USDC = 40
 RSI_BUY_THRESHOLD = 35
 RSI_SELL_THRESHOLD = 58
 COOLDOWN_MINUTES = 15
@@ -23,7 +24,6 @@ mexc = ccxt.mexc({
 
 groq_client = Groq(api_key=os.getenv('GROQ_KEY'))
 
-# Stan bota
 state = {
     "usdc": 0.0, "total": 0.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
@@ -32,6 +32,20 @@ state = {
 }
 
 last_buy_time = {"BTC": datetime.now() - timedelta(hours=1), "ETH": datetime.now() - timedelta(hours=1)}
+
+def save_to_history(total_val):
+    history = []
+    if os.path.exists(STATS_FILE):
+        with open(STATS_FILE, 'r') as f:
+            try: history = json.load(f)
+            except: history = []
+    
+    # Dodajemy nowy punkt: czas (timestamp) i wartość
+    history.append({"t": datetime.now().strftime("%H:%M"), "v": round(total_val, 2)})
+    
+    # Zachowujemy ostatnie 100 pomiarów, by nie zapchać pamięci
+    with open(STATS_FILE, 'w') as f:
+        json.dump(history[-100:], f)
 
 def get_rsi(symbol):
     try:
@@ -64,33 +78,25 @@ def trade_logic():
             rsi = get_rsi(sym)
             state["assets"][sym] = {"amount": round(owned, 6), "rsi": rsi}
 
-            # LOGIKA KUPNA (LIMIT ORDER jako pseudo-market)
             if rsi < RSI_BUY_THRESHOLD and usdc_now >= TRADE_AMOUNT_USDC:
                 if datetime.now() - last_buy_time[sym] > timedelta(minutes=COOLDOWN_MINUTES):
                     try:
-                        # Obliczamy ilość i cenę (0.1% powyżej rynkowej, by weszło od razu)
                         buy_price = price * 1.001 
                         qty = TRADE_AMOUNT_USDC / buy_price
-                        
-                        # Formatuje cenę i ilość zgodnie z wymogami MEXC
                         prec_price = mexc.price_to_precision(pair, buy_price)
                         prec_qty = mexc.amount_to_precision(pair, qty)
-                        
                         mexc.create_order(pair, 'limit', 'buy', prec_qty, prec_price)
-                        
                         last_buy_time[sym] = datetime.now()
                         state["buy_count"] += 1
-                        actions.append(f"✅ BUY {sym} @ {prec_price}")
+                        actions.append(f"✅ BUY {sym}")
                     except Exception as e:
-                        actions.append(f"❌ ERR {sym}: {str(e)[:20]}")
+                        actions.append(f"❌ ERR {sym}")
 
-            # LOGIKA SPRZEDAŻY
             elif rsi > RSI_SELL_THRESHOLD and owned > 0:
                 try:
-                    sell_price = price * 0.999 # 0.1% poniżej rynku, by sprzedać natychmiast
+                    sell_price = price * 0.999
                     prec_price = mexc.price_to_precision(pair, sell_price)
                     prec_qty = mexc.amount_to_precision(pair, owned)
-                    
                     mexc.create_order(pair, 'limit', 'sell', prec_qty, prec_price)
                     state["sell_count"] += 1
                     actions.append(f"💰 SELL {sym}")
@@ -103,17 +109,24 @@ def trade_logic():
             "profit": round(total_val - INITIAL_CAPITAL, 2),
             "last_action": " | ".join(actions) if actions else f"Scanning... ({datetime.now().strftime('%H:%M')})"
         })
+        save_to_history(total_val)
     except Exception as e:
         state["last_action"] = f"CRITICAL ERR: {str(e)[:30]}"
 
 @app.route('/api/data')
-def get_data(): return jsonify(state)
+def get_data():
+    history = []
+    if os.path.exists(STATS_FILE):
+        with open(STATS_FILE, 'r') as f:
+            history = json.load(f)
+    return jsonify({"state": state, "history": history})
 
 @app.route('/')
 def home():
     return render_template_string("""
     <!DOCTYPE html><html><head>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body { background: #050505; color: #00ff41; font-family: 'Courier New', monospace; padding: 20px; }
         .card { border: 2px solid #00ff41; padding: 15px; margin-bottom: 15px; background: #000; box-shadow: 0 0 10px #00ff41; }
@@ -121,15 +134,17 @@ def home():
         .val { font-size: 1.4em; display: block; }
         .status { color: #ffbc00; border-color: #ffbc00; box-shadow: 0 0 10px #ffbc00; }
         .asset-row { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding: 5px 0; }
+        .chart-box { height: 200px; margin-top: 10px; }
     </style></head>
     <body>
         <div class="card">
-            <span class="label">WALLET (USDC)</span>
-            <span class="val" id="usdc">0.00</span>
-        </div>
-        <div class="card">
             <span class="label">TOTAL EQUITY</span>
             <span class="val" id="total">0.00</span>
+            <div class="chart-box"><canvas id="balanceChart"></canvas></div>
+        </div>
+        <div class="card">
+            <span class="label">WALLET (USDC)</span>
+            <span id="usdc" class="val">0.00</span>
         </div>
         <div class="card status">
             <span class="label" style="color:#ffbc00">SYSTEM LOG</span>
@@ -141,16 +156,36 @@ def home():
             <div class="asset-row"><span>ETH</span><span id="eth_rsi">--</span><span id="eth_amt">--</span></div>
         </div>
         <script>
+            let chart;
             async function update() {
                 try {
                     const r = await fetch('/api/data'); const d = await r.json();
-                    document.getElementById('usdc').innerText = d.usdc + ' $';
-                    document.getElementById('total').innerText = d.total + ' $';
-                    document.getElementById('log').innerText = d.last_action;
-                    document.getElementById('btc_rsi').innerText = d.assets.BTC.rsi;
-                    document.getElementById('eth_rsi').innerText = d.assets.ETH.rsi;
-                    document.getElementById('btc_amt').innerText = d.assets.BTC.amount;
-                    document.getElementById('eth_amt').innerText = d.assets.ETH.amount;
+                    document.getElementById('usdc').innerText = d.state.usdc + ' $';
+                    document.getElementById('total').innerText = d.state.total + ' $';
+                    document.getElementById('log').innerText = d.state.last_action;
+                    document.getElementById('btc_rsi').innerText = d.state.assets.BTC.rsi;
+                    document.getElementById('eth_rsi').innerText = d.state.assets.ETH.rsi;
+                    document.getElementById('btc_amt').innerText = d.state.assets.BTC.amount;
+                    document.getElementById('eth_amt').innerText = d.state.assets.ETH.amount;
+
+                    const ctx = document.getElementById('balanceChart').getContext('2d');
+                    const labels = d.history.map(h => h.t);
+                    const values = d.history.map(h => h.v);
+
+                    if(!chart) {
+                        chart = new Chart(ctx, {
+                            type: 'line',
+                            data: {
+                                labels: labels,
+                                datasets: [{ label: 'Total Value', data: values, borderColor: '#00ff41', tension: 0.3, fill: false }]
+                            },
+                            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: '#111' } } } }
+                        });
+                    } else {
+                        chart.data.labels = labels;
+                        chart.data.datasets[0].data = values;
+                        chart.update();
+                    }
                 } catch(e) {}
             }
             setInterval(update, 5000); update();
