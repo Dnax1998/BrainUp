@@ -1,19 +1,21 @@
-import os, json, ccxt, pandas as pd
+import os, json, ccxt, pandas as pd, time
 from flask import Flask, render_template_string, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 from groq import Groq
 
 app = Flask('')
-# Plik do przechowywania historii salda, aby wykres nie znikał po restarcie
 STATS_FILE = 'balance_history.json'
 
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0
-TRADE_AMOUNT_USDC = 40
+TRADE_AMOUNT_USDC = 22.0
 RSI_BUY_THRESHOLD = 35
 RSI_SELL_THRESHOLD = 58
 COOLDOWN_MINUTES = 15
+
+# Zapisujemy czas startu bota
+BOT_START_TIME = time.time()
 
 mexc = ccxt.mexc({
     'apiKey': os.getenv('MEXC_API_KEY'),
@@ -28,10 +30,20 @@ state = {
     "usdc": 0.0, "total": 0.0, "profit": 0.0,
     "buy_count": 0, "sell_count": 0,
     "last_action": "System Ready",
+    "uptime": "0h 0m",
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
 last_buy_time = {"BTC": datetime.now() - timedelta(hours=1), "ETH": datetime.now() - timedelta(hours=1)}
+
+def get_uptime():
+    seconds = int(time.time() - BOT_START_TIME)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    days = hours // 24
+    if days > 0:
+        return f"{days}d {hours % 24}h {minutes}m"
+    return f"{hours}h {minutes}m"
 
 def save_to_history(total_val):
     history = []
@@ -39,11 +51,7 @@ def save_to_history(total_val):
         with open(STATS_FILE, 'r') as f:
             try: history = json.load(f)
             except: history = []
-    
-    # Dodajemy nowy punkt: czas (timestamp) i wartość
     history.append({"t": datetime.now().strftime("%H:%M"), "v": round(total_val, 2)})
-    
-    # Zachowujemy ostatnie 100 pomiarów, by nie zapchać pamięci
     with open(STATS_FILE, 'w') as f:
         json.dump(history[-100:], f)
 
@@ -107,6 +115,7 @@ def trade_logic():
             "usdc": round(usdc_now, 2),
             "total": round(total_val, 2),
             "profit": round(total_val - INITIAL_CAPITAL, 2),
+            "uptime": get_uptime(),
             "last_action": " | ".join(actions) if actions else f"Scanning... ({datetime.now().strftime('%H:%M')})"
         })
         save_to_history(total_val)
@@ -118,7 +127,8 @@ def get_data():
     history = []
     if os.path.exists(STATS_FILE):
         with open(STATS_FILE, 'r') as f:
-            history = json.load(f)
+            try: history = json.load(f)
+            except: history = []
     return jsonify({"state": state, "history": history})
 
 @app.route('/')
@@ -132,24 +142,35 @@ def home():
         .card { border: 2px solid #00ff41; padding: 15px; margin-bottom: 15px; background: #000; box-shadow: 0 0 10px #00ff41; }
         .label { color: #888; font-size: 0.8em; }
         .val { font-size: 1.4em; display: block; }
+        .profit-val { color: #fff; font-weight: bold; }
         .status { color: #ffbc00; border-color: #ffbc00; box-shadow: 0 0 10px #ffbc00; }
         .asset-row { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding: 5px 0; }
-        .chart-box { height: 200px; margin-top: 10px; }
+        .chart-box { height: 180px; margin-top: 10px; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     </style></head>
     <body>
         <div class="card">
-            <span class="label">TOTAL EQUITY</span>
-            <span class="val" id="total">0.00</span>
+            <span class="label">TOTAL EQUITY / PROFIT</span>
+            <span class="val"><span id="total">0.00</span> / <span id="profit" class="profit-val">0.00</span></span>
             <div class="chart-box"><canvas id="balanceChart"></canvas></div>
         </div>
-        <div class="card">
-            <span class="label">WALLET (USDC)</span>
-            <span id="usdc" class="val">0.00</span>
+        
+        <div class="stats-grid">
+            <div class="card">
+                <span class="label">UPTIME</span>
+                <span id="uptime" class="val">0h 0m</span>
+            </div>
+            <div class="card">
+                <span class="label">USDC FREE</span>
+                <span id="usdc" class="val">0.00</span>
+            </div>
         </div>
+
         <div class="card status">
             <span class="label" style="color:#ffbc00">SYSTEM LOG</span>
             <span class="val" id="log">INITIALIZING...</span>
         </div>
+
         <div class="card">
             <div class="asset-row"><b>ASSET</b><b>RSI</b><b>HOLDING</b></div>
             <div class="asset-row"><span>BTC</span><span id="btc_rsi">--</span><span id="btc_amt">--</span></div>
@@ -162,6 +183,9 @@ def home():
                     const r = await fetch('/api/data'); const d = await r.json();
                     document.getElementById('usdc').innerText = d.state.usdc + ' $';
                     document.getElementById('total').innerText = d.state.total + ' $';
+                    document.getElementById('profit').innerText = (d.state.profit > 0 ? '+' : '') + d.state.profit + ' $';
+                    document.getElementById('profit').style.color = d.state.profit >= 0 ? '#00ff41' : '#ff4141';
+                    document.getElementById('uptime').innerText = d.state.uptime;
                     document.getElementById('log').innerText = d.state.last_action;
                     document.getElementById('btc_rsi').innerText = d.state.assets.BTC.rsi;
                     document.getElementById('eth_rsi').innerText = d.state.assets.ETH.rsi;
@@ -177,9 +201,9 @@ def home():
                             type: 'line',
                             data: {
                                 labels: labels,
-                                datasets: [{ label: 'Total Value', data: values, borderColor: '#00ff41', tension: 0.3, fill: false }]
+                                datasets: [{ label: 'Total Value', data: values, borderColor: '#00ff41', tension: 0.3, fill: false, pointRadius: 0 }]
                             },
-                            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: '#111' } } } }
+                            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { grid: { color: '#111' }, ticks: { color: '#444', font: { size: 10 } } } } }
                         });
                     } else {
                         chart.data.labels = labels;
