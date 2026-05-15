@@ -9,7 +9,7 @@ STATS_FILE = 'balance_history.json'
 
 # --- KONFIGURACJA ---
 INITIAL_CAPITAL = 1000.0
-TRADE_AMOUNT_USDC = 22.0  # Lekko zwiększone, by uniknąć progu "min cost"
+TRADE_AMOUNT_USDC = 50  # Lekko zwiększone, by uniknąć progu "min cost"
 RSI_BUY_THRESHOLD = 35
 RSI_SELL_THRESHOLD = 58
 COOLDOWN_MINUTES = 15
