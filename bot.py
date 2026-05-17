@@ -14,7 +14,7 @@ RSI_BUY_THRESHOLD = 35
 RSI_SELL_THRESHOLD = 58
 COOLDOWN_MINUTES = 15
 
-# Zapisujemy czas startu bota
+# Czas startu bota do liczenia Uptime
 BOT_START_TIME = time.time()
 
 mexc = ccxt.mexc({
@@ -34,7 +34,9 @@ state = {
     "assets": {"BTC": {"amount":0, "rsi":50}, "ETH": {"amount":0, "rsi":50}}
 }
 
+# Słowniki śledzące czas zakupu i cenę uśrednioną
 last_buy_time = {"BTC": datetime.now() - timedelta(hours=1), "ETH": datetime.now() - timedelta(hours=1)}
+avg_buy_prices = {"BTC": 0.0, "ETH": 0.0}
 
 def get_uptime():
     seconds = int(time.time() - BOT_START_TIME)
@@ -66,8 +68,17 @@ def get_rsi(symbol):
         return round(rsi.iloc[-1], 1)
     except: return 50.0
 
+def ask_ai_decision(symbol, price, rsi):
+    try:
+        prompt = f"Analiza {symbol}: Cena {price}, RSI {rsi}. Kupujemy? Odpowiedz tylko TAK lub NIE."
+        completion = groq_client.chat.completions.create(
+            model="llama3-8b-8192", messages=[{"role": "user", "content": prompt}], max_tokens=5
+        )
+        return "TAK" in completion.choices[0].message.content.strip().upper()
+    except: return True 
+
 def trade_logic():
-    global state, last_buy_time
+    global state, last_buy_time, avg_buy_prices
     try:
         mexc.load_markets()
         balance = mexc.fetch_balance()
@@ -86,30 +97,44 @@ def trade_logic():
             rsi = get_rsi(sym)
             state["assets"][sym] = {"amount": round(owned, 6), "rsi": rsi}
 
+            # --- REGUŁA KUPNA ---
             if rsi < RSI_BUY_THRESHOLD and usdc_now >= TRADE_AMOUNT_USDC:
                 if datetime.now() - last_buy_time[sym] > timedelta(minutes=COOLDOWN_MINUTES):
-                    try:
-                        buy_price = price * 1.001 
-                        qty = TRADE_AMOUNT_USDC / buy_price
-                        prec_price = mexc.price_to_precision(pair, buy_price)
-                        prec_qty = mexc.amount_to_precision(pair, qty)
-                        mexc.create_order(pair, 'limit', 'buy', prec_qty, prec_price)
-                        last_buy_time[sym] = datetime.now()
-                        state["buy_count"] += 1
-                        actions.append(f"✅ BUY {sym}")
-                    except Exception as e:
-                        actions.append(f"❌ ERR {sym}")
+                    if ask_ai_decision(sym, price, rsi):
+                        try:
+                            buy_price = price * 1.0005 # Minimalna dopłata dla natychmiastowego limitu
+                            qty = TRADE_AMOUNT_USDC / buy_price
+                            
+                            prec_price = mexc.price_to_precision(pair, buy_price)
+                            prec_qty = mexc.amount_to_precision(pair, qty)
+                            
+                            mexc.create_order(pair, 'limit', 'buy', prec_qty, prec_price)
+                            
+                            last_buy_time[sym] = datetime.now()
+                            avg_buy_prices[sym] = price
+                            state["buy_count"] += 1
+                            actions.append(f"✅ BUY {sym}")
+                        except Exception as e:
+                            actions.append(f"❌ ERR BUY {sym}")
 
+            # --- REGUŁA SPRZEDAŻY (NAPRAWIONA) ---
             elif rsi > RSI_SELL_THRESHOLD and owned > 0:
-                try:
-                    sell_price = price * 0.999
-                    prec_price = mexc.price_to_precision(pair, sell_price)
-                    prec_qty = mexc.amount_to_precision(pair, owned)
-                    mexc.create_order(pair, 'limit', 'sell', prec_qty, prec_price)
-                    state["sell_count"] += 1
-                    actions.append(f"💰 SELL {sym}")
-                except Exception as e:
-                    actions.append(f"❌ SELL ERR {sym}")
+                # Blokada: sprzedaj tylko, gdy aktualna cena daje minimum 1.2% zysku od ceny zakupu
+                if price > (avg_buy_prices[sym] * 1.012):
+                    try:
+                        # Obniżka o jedyne 0.02% zamiast 0.1%, chroni wypracowany zysk przed spreadem
+                        sell_price = price * 0.9998
+                        
+                        prec_price = mexc.price_to_precision(pair, sell_price)
+                        prec_qty = mexc.amount_to_precision(pair, owned)
+                        
+                        mexc.create_order(pair, 'limit', 'sell', prec_qty, prec_price)
+                        
+                        state["sell_count"] += 1
+                        avg_buy_prices[sym] = 0.0
+                        actions.append(f"💰 SELL {sym}")
+                    except Exception as e:
+                        actions.append(f"❌ ERR SELL {sym}")
 
         state.update({
             "usdc": round(usdc_now, 2),
