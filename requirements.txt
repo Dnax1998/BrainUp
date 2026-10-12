@@ -1,7 +1,0 @@
-flask
-requests
-ccxt
-groq
-apscheduler
-pandas
-pytz
